@@ -1,0 +1,2475 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Broadcast Pool</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --btc: #F7931A;
+            --btc-dim: #F7931A33;
+            --btc-glow: #F7931A66;
+            --bg: #0C0C0E;
+            --bg-card: #141418;
+            --bg-card-hover: #1A1A1F;
+            --border: #2A2A30;
+            --text: #E8E6E3;
+            --text-dim: #8A8A95;
+            --green: #00D97E;
+            --red: #FF4757;
+            --amber: #FFB347;
+            --blue: #4ECDC4;
+            --liana-green: #00FF68;
+            --liana-green-dim: #00FF6822;
+            --font-mono: 'JetBrains Mono', monospace;
+            --font-sans: 'Outfit', sans-serif;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            font-size: 18px;
+            line-height: 1.6;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background:
+                radial-gradient(ellipse at 20% 50%, #F7931A08 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 20%, #4ECDC405 0%, transparent 50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .app { position: relative; z-index: 1; }
+
+        .header {
+            padding: 36px 60px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: linear-gradient(180deg, #141418 0%, #0C0C0E 100%);
+        }
+
+        .header-left { display: flex; align-items: center; gap: 20px; }
+
+        .logo {
+            width: 56px; height: 56px;
+            background: var(--btc);
+            border-radius: 14px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 28px;
+            box-shadow: 0 0 24px var(--btc-dim);
+            animation: pulse-glow 3s ease-in-out infinite;
+        }
+
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 24px var(--btc-dim); }
+            50% { box-shadow: 0 0 36px var(--btc-glow); }
+        }
+
+        .header h1 { font-family: var(--font-mono); font-size: 34px; font-weight: 700; letter-spacing: -0.5px; }
+        .header h1 span { color: var(--btc); }
+        .network-badge {
+            display: inline-block;
+            font-size: 14px;
+            font-weight: 600;
+            padding: 4px 12px;
+            margin-left: 12px;
+            border-radius: 8px;
+            background: rgba(247, 147, 26, 0.15);
+            color: var(--btc);
+            vertical-align: middle;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .protocol-banner {
+            background: linear-gradient(135deg, rgba(247, 147, 26, 0.08), rgba(59, 130, 246, 0.08));
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 20px 24px;
+            margin-bottom: 32px;
+        }
+
+        .protocol-banner h3 {
+            font-family: var(--font-mono);
+            font-size: 16px;
+            color: var(--btc);
+            margin-bottom: 8px;
+        }
+
+        .protocol-banner p {
+            font-size: 14px;
+            color: var(--text-dim);
+            line-height: 1.5;
+        }
+
+        .nav { display: flex; gap: 10px; align-items: center; }
+
+        .lang-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            padding: 8px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.2s;
+            min-width: 40px;
+            text-align: center;
+        }
+        .lang-btn:hover { border-color: var(--btc); color: var(--btc); }
+        .lang-btn.active { background: var(--btc); color: #000; border-color: var(--btc); }
+
+        .nav-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-dim);
+            padding: 12px 24px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-family: var(--font-mono);
+            font-size: 15px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .nav-btn:hover, .nav-btn.active {
+            background: var(--btc-dim);
+            border-color: var(--btc);
+            color: var(--btc);
+        }
+
+        .container { max-width: 1800px; margin: 0 auto; padding: 48px 60px; }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 24px;
+            margin-bottom: 48px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 32px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 4px;
+            background: var(--border);
+        }
+
+        .stat-card:hover { background: var(--bg-card-hover); transform: translateY(-2px); }
+        .stat-card.pending::before { background: var(--red); }
+        .stat-card.scheduled::before { background: var(--amber); }
+        .stat-card.broadcast::before { background: var(--blue); }
+        .stat-card.confirmed::before { background: var(--green); }
+        .stat-card.total::before { background: var(--btc); }
+
+        .stat-card .label {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 10px;
+        }
+
+        .stat-card .value { font-family: var(--font-mono); font-size: 52px; font-weight: 700; line-height: 1; }
+        .stat-card.pending .value { color: var(--red); }
+        .stat-card.scheduled .value { color: var(--amber); }
+        .stat-card.broadcast .value { color: var(--blue); }
+        .stat-card.confirmed .value { color: var(--green); }
+        .stat-card.total .value { color: var(--btc); }
+        .stat-card.price::before { background: var(--btc); }
+        .stat-card.price .value { color: var(--btc); font-size: 38px; }
+        .stat-card .sub { font-size: 15px; color: var(--text-dim); margin-top: 8px; }
+        .stat-card.price .price-dual {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-top: 4px;
+        }
+        .stat-card.price .price-line {
+            font-family: var(--font-mono);
+            font-size: 38px;
+            font-weight: 700;
+            line-height: 1.1;
+            color: var(--btc);
+        }
+        .stat-card.price .price-line .fiat-tag {
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--text-dim);
+            margin-right: 6px;
+        }
+        .stat-card.price .sub.stale { color: var(--amber); }
+        .stat-card.mempool .value {
+            font-size: 40px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+        .stat-card.mempool-low::before { background: var(--green); }
+        .stat-card.mempool-medium::before { background: var(--amber); }
+        .stat-card.mempool-high::before { background: var(--red); }
+        .stat-card.mempool-low .value { color: var(--green); }
+        .stat-card.mempool-medium .value { color: var(--amber); }
+        .stat-card.mempool-high .value { color: var(--red); }
+
+        .section {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            margin-bottom: 28px;
+            overflow: hidden;
+        }
+
+        .section-header {
+            padding: 28px 32px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .section-header h2 { font-family: var(--font-mono); font-size: 22px; font-weight: 600; }
+
+        .import-form {
+            padding: 24px 28px;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: stretch;
+        }
+
+        .import-form input {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 16px 20px;
+            border-radius: 12px;
+            font-family: var(--font-mono);
+            font-size: 16px;
+            flex: 1;
+            min-width: 200px;
+            transition: border-color 0.2s;
+        }
+
+        .import-form input:focus {
+            outline: none;
+            border-color: var(--btc);
+            box-shadow: 0 0 0 3px var(--btc-dim);
+        }
+
+        .import-form input::placeholder { color: var(--text-dim); }
+
+        .btn {
+            background: var(--btc);
+            color: #000;
+            border: none;
+            padding: 16px 28px;
+            border-radius: 12px;
+            cursor: pointer;
+            font-family: var(--font-mono);
+            font-size: 15px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            transition: all 0.2s;
+        }
+
+        .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 14px var(--btc-dim); }
+        .btn:active { transform: translateY(0); }
+        .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+        .btn-outline:hover { border-color: var(--btc); color: var(--btc); }
+        .sch-tab-btn.sch-tab-active { border-color: var(--btc); color: var(--btc); background: #F7931A14; }
+        .btn-sm { padding: 8px 14px; font-size: 13px; }
+        .btn-red { background: var(--red); }
+
+        /* ── Copyable fields ─────────────────────────── */
+        .copyable {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            padding: 3px 8px;
+            border-radius: 6px;
+            transition: background 0.2s;
+            font-family: var(--font-mono);
+        }
+
+        .copyable:hover { background: var(--btc-dim); }
+
+        .copyable .text {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 120px;
+        }
+
+        .copyable .copy-icon {
+            opacity: 0;
+            transition: opacity 0.2s;
+            color: var(--btc);
+            font-size: 14px;
+        }
+
+        .copyable:hover .copy-icon { opacity: 1; }
+
+        .copyable.copied .copy-icon { content: '✓'; }
+
+        a.mempool-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: var(--blue);
+            text-decoration: none;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            padding: 3px 8px;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        a.mempool-link:hover {
+            background: #4ECDC422;
+            text-decoration: underline;
+        }
+
+        .tx-hex-cell {
+            max-width: 250px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+
+        /* ── Table ────────────────────────────────────── */
+        table { width: 100%; border-collapse: collapse; }
+
+        th, td {
+            padding: 18px 20px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            font-weight: 600;
+        }
+
+        td { font-size: 16px; }
+
+        .status {
+            display: inline-block;
+            padding: 5px 14px;
+            border-radius: 9999px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .status-pending { background: #FF475722; color: var(--red); }
+        .status-scheduled { background: #FFB34722; color: var(--amber); }
+        .status-waiting-locktime { background: #7B68EE22; color: #B8A9FF; }
+        .status-deferred-mtp { background: #FF6B6B22; color: #FF8E8E; }
+        .status-broadcast { background: #4ECDC422; color: var(--blue); }
+        .status-confirmed { background: #00D97E22; color: var(--green); }
+        .status-failed { background: #8A8A9522; color: var(--text-dim); }
+
+        .type-immediate { background: #4ECDC422; color: var(--blue); }
+        .type-scheduled { background: #FFB34722; color: var(--amber); }
+        .type-by_block { background: #F7931A22; color: var(--btc); }
+        .type-manual { background: #7B68EE22; color: #B8A9FF; }
+
+        .fee { font-family: var(--font-mono); font-weight: 600; }
+        .time { color: var(--text-dim); font-size: 13px; }
+        .empty { text-align: center; padding: 70px 24px; color: var(--text-dim); font-size: 18px; }
+        .actions { display: flex; gap: 6px; flex-wrap: nowrap; }
+
+        /* ── Onboarding Wizard ─────────────────────────── */
+        .wizard-overlay { z-index: 110; }
+        .wizard-modal {
+            max-width: 1080px;
+            width: 96%;
+            min-height: 620px;
+            max-height: 94vh;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid var(--btc);
+            box-shadow: 0 0 60px var(--btc-dim), 0 24px 80px #00000088;
+        }
+        .wizard-modal .modal-header {
+            padding: 32px 44px;
+            border-bottom: 1px solid var(--border);
+        }
+        .wizard-modal .modal-header h3 {
+            font-size: 34px;
+            font-weight: 800;
+            letter-spacing: -0.4px;
+        }
+        .wizard-progress {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 18px;
+            padding: 24px 44px 0;
+        }
+        .wizard-dot {
+            width: 18px; height: 18px;
+            border-radius: 50%;
+            background: var(--border);
+            transition: all 0.25s;
+        }
+        .wizard-dot.active { background: var(--btc); box-shadow: 0 0 18px var(--btc-glow); transform: scale(1.25); }
+        .wizard-dot.done { background: var(--green); }
+        .wizard-step-counter {
+            text-align: center;
+            font-family: var(--font-mono);
+            font-size: 17px;
+            font-weight: 600;
+            color: var(--text-dim);
+            padding: 14px 44px 0;
+            letter-spacing: 0.5px;
+        }
+        .wizard-body {
+            padding: 32px 44px 20px;
+            flex: 1;
+            overflow-y: auto;
+            min-height: 340px;
+        }
+        .wizard-step { display: none; animation: wizard-fade 0.2s ease; }
+        .wizard-step.active { display: block; }
+        @keyframes wizard-fade {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .wizard-lead {
+            font-size: 22px;
+            color: var(--text);
+            line-height: 1.65;
+            margin-bottom: 26px;
+            font-weight: 400;
+        }
+        .wizard-flow {
+            font-family: var(--font-mono);
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--btc);
+            background: var(--bg);
+            border: 1px solid var(--btc);
+            border-radius: 14px;
+            padding: 22px 28px;
+            margin-bottom: 26px;
+            text-align: center;
+            box-shadow: 0 0 28px var(--btc-dim);
+            letter-spacing: 0.2px;
+        }
+        .wizard-card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px 32px;
+            margin-bottom: 0;
+        }
+        .wizard-card.sparrow { border-top: 5px solid var(--btc); box-shadow: 0 0 24px var(--btc-dim); }
+        .wizard-card.liana { border-top: 5px solid var(--liana-green); box-shadow: 0 0 24px var(--liana-green-dim); }
+        .wizard-card.settings { border-top: 5px solid var(--green); box-shadow: 0 0 24px #00D97E22; }
+        .wizard-card h4 {
+            font-family: var(--font-mono);
+            font-size: 26px;
+            font-weight: 800;
+            margin-bottom: 18px;
+            letter-spacing: 0.4px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .wizard-card.sparrow h4 { color: var(--btc); }
+        .wizard-card.liana h4 { color: var(--liana-green); }
+        .wizard-card.settings h4 { color: var(--green); }
+        .wizard-card ul {
+            list-style: none;
+            font-size: 19px;
+            color: var(--text);
+            line-height: 1.7;
+        }
+        .wizard-card ul li { padding: 10px 0 10px 28px; position: relative; }
+        .wizard-card ul li::before {
+            content: '\2022';
+            position: absolute;
+            left: 0;
+            color: var(--btc);
+            font-size: 24px;
+            line-height: 1.4;
+        }
+        .wizard-card.liana ul li::before { color: var(--liana-green); }
+        .wizard-card.settings ul li::before { color: var(--green); }
+        .wizard-tip {
+            font-size: 17px;
+            font-weight: 600;
+            color: var(--amber);
+            margin-top: 18px;
+            line-height: 1.55;
+            padding: 14px 18px;
+            background: #F59E0B14;
+            border-radius: 10px;
+            border-left: 3px solid var(--amber);
+        }
+        .wizard-footer {
+            padding: 22px 44px 36px;
+            border-top: 1px solid var(--border);
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            gap: 20px;
+        }
+        .wizard-dismiss {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            font-size: 18px;
+            color: var(--text);
+            cursor: pointer;
+            user-select: none;
+        }
+        .wizard-dismiss input { width: 20px; height: 20px; accent-color: var(--btc); cursor: pointer; flex-shrink: 0; }
+        .wizard-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .wizard-skip {
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            font-size: 17px;
+            cursor: pointer;
+            font-family: var(--font-sans);
+            padding: 12px 4px;
+            white-space: nowrap;
+        }
+        .wizard-skip:hover { color: var(--text); }
+        .wizard-nav-btns { display: flex; gap: 12px; }
+        .wizard-nav-btns .btn { padding: 16px 36px; font-size: 18px; font-weight: 600; min-width: 120px; }
+        .nav-btn-guide { min-width: auto; padding: 12px 16px; font-size: 18px; }
+
+        /* ── Detail Modal ─────────────────────────────── */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #000000CC;
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.active { display: flex; }
+
+        .modal {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            width: 90%;
+            max-width: 750px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            padding: 24px 28px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 { font-family: var(--font-mono); font-size: 20px; }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            font-size: 28px;
+            cursor: pointer;
+        }
+
+        .modal-close:hover { color: var(--text); }
+
+        .modal-body { padding: 28px; }
+
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .detail-row:last-child { border-bottom: none; }
+
+        .detail-label {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            min-width: 140px;
+        }
+
+        .detail-value {
+            font-family: var(--font-mono);
+            font-size: 16px;
+            text-align: right;
+            flex: 1;
+            margin-left: 16px;
+        }
+
+        .detail-value.hex {
+            font-size: 12px;
+            word-break: break-all;
+            color: var(--text-dim);
+            max-height: 60px;
+            overflow-y: auto;
+            background: var(--bg);
+            padding: 8px;
+            border-radius: 6px;
+        }
+
+        .detail-actions {
+            padding: 16px 24px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        /* ── Settings ─────────────────────────────────── */
+        .settings-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 28px;
+            padding: 32px;
+        }
+
+        .setting-group label {
+            display: block;
+            font-family: var(--font-mono);
+            font-size: 14px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 12px;
+        }
+
+        .setting-group input {
+            width: 100%;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 16px 20px;
+            border-radius: 12px;
+            font-family: var(--font-mono);
+            font-size: 16px;
+            transition: border-color 0.2s;
+        }
+
+        .setting-group input:focus {
+            outline: none;
+            border-color: var(--btc);
+            box-shadow: 0 0 0 3px var(--btc-dim);
+        }
+
+        .setting-hint { font-size: 14px; color: var(--text-dim); margin-top: 8px; }
+
+        /* ── Datetime picker styling ─────────────────── */
+        input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+            filter: invert(0.7);
+            cursor: pointer;
+        }
+
+        .settings-footer {
+            padding: 24px 32px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: flex-end;
+            gap: 14px;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: var(--green);
+            color: #000;
+            padding: 18px 28px;
+            border-radius: 12px;
+            font-family: var(--font-mono);
+            font-size: 15px;
+            font-weight: 700;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s;
+            z-index: 200;
+        }
+
+        .toast.show { transform: translateY(0); opacity: 1; }
+
+        .page { display: none; }
+        .page.active { display: block; }
+
+        @media (max-width: 768px) {
+            .stats { grid-template-columns: 1fr; }
+            .settings-grid { grid-template-columns: 1fr; }
+            .header { padding: 24px; flex-direction: column; gap: 16px; }
+            .container { padding: 24px; }
+            .wizard-modal { min-height: auto; width: 98%; }
+            .wizard-body { padding: 24px 28px 16px; min-height: 280px; }
+            .wizard-footer { grid-template-columns: 1fr; gap: 16px; padding: 20px 28px 28px; }
+            .wizard-actions { flex-wrap: wrap; justify-content: flex-end; width: 100%; }
+            .wizard-lead { font-size: 19px; }
+            .wizard-card ul { font-size: 17px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <div class="header">
+            <div class="header-left">
+                <div class="logo">&#8383;</div>
+                <h1>broadcast<span>-pool</span> <span id="active-network" class="network-badge">...</span></h1>
+            </div>
+            <div class="nav">
+                <button class="nav-btn active" onclick="showPage('dashboard')" data-i18n="nav_dashboard">Dashboard</button>
+                <button class="nav-btn" onclick="showPage('settings')" data-i18n="nav_settings">Settings</button>
+                <button class="nav-btn nav-btn-guide" onclick="openWizard(true)" title="Guide">?</button>
+                <button class="lang-btn" onclick="setLanguage('en')" id="lang-en">EN</button>
+                <button class="lang-btn" onclick="setLanguage('es')" id="lang-es">ES</button>
+            </div>
+        </div>
+
+        <div id="page-dashboard" class="page active">
+            <div class="container">
+                <div class="protocol-banner">
+                    <h3 data-i18n="protocol_banner_title">Virtual Mempool Active</h3>
+                    <p data-i18n="protocol_banner_text">Transactions from your wallet are retained locally and shown as pending. Broadcast happens when the scheduler triggers.</p>
+                </div>
+                <div class="stats">
+                    <div class="stat-card">
+                        <div class="label" data-i18n="stat_block_height">Block Height</div>
+                        <div class="value" id="s-blockheight" style="color: var(--accent);">-</div>
+                        <div class="sub" id="s-blockheight-sub" data-i18n="stat_loading">Loading...</div>
+                    </div>
+                    <div class="stat-card pending">
+                        <div class="label" data-i18n="stat_pending">Pending</div>
+                        <div class="value" id="s-pending">0</div>
+                        <div class="sub" data-i18n="stat_pending_sub">Waiting to schedule</div>
+                    </div>
+                    <div class="stat-card scheduled">
+                        <div class="label" data-i18n="stat_scheduled">Scheduled</div>
+                        <div class="value" id="s-scheduled">0</div>
+                        <div class="sub" data-i18n="stat_scheduled_sub">Timed for broadcast</div>
+                    </div>
+                    <div class="stat-card broadcast">
+                        <div class="label" data-i18n="stat_broadcast">Broadcast</div>
+                        <div class="value" id="s-broadcast">0</div>
+                        <div class="sub" data-i18n="stat_broadcast_sub">In mempool</div>
+                    </div>
+                    <div class="stat-card confirmed">
+                        <div class="label" data-i18n="stat_confirmed">Confirmed</div>
+                        <div class="value" id="s-confirmed">0</div>
+                        <div class="sub" data-i18n="stat_confirmed_sub">In blockchain</div>
+                    </div>
+                    <div class="stat-card mempool" id="s-mempool-card">
+                        <div class="label" data-i18n="stat_mempool">Mempool</div>
+                        <div class="value" id="s-mempool-level">—</div>
+                        <div class="sub" id="s-mempool-sub" data-i18n="stat_mempool_sub">Network fee congestion</div>
+                    </div>
+                    <div class="stat-card total">
+                        <div class="label" data-i18n="stat_total">Total</div>
+                        <div class="value" id="s-total">0</div>
+                        <div class="sub" data-i18n="stat_total_sub">All transactions</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="label" data-i18n="stat_value">Value</div>
+                        <div class="value" id="s-value" style="color: var(--text);">0</div>
+                        <div class="sub" data-i18n="stat_value_sub">BTC in pool</div>
+                    </div>
+                    <div class="stat-card price">
+                        <div class="label" data-i18n="stat_btc_price">BTC Price</div>
+                        <div class="price-dual">
+                            <div class="price-line" id="s-price-eur"><span class="fiat-tag">€</span>—</div>
+                            <div class="price-line" id="s-price-usd"><span class="fiat-tag">$</span>—</div>
+                        </div>
+                        <div class="sub" id="s-price-sub" data-i18n="stat_btc_price_sub">Live spot price</div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <div class="section-header">
+                        <h2>&#9889; <span data-i18n="import_title">Import Transaction</span></h2>
+                    </div>
+<div class="import-form">
+    <input type="text" id="import-hex" data-i18n-placeholder="import_hex" placeholder="Raw transaction hex (02000000...)" style="flex: 4;">
+    <input type="text" id="import-label" data-i18n-placeholder="import_label" placeholder="Label (optional)" style="flex: 1;">
+    <input type="hidden" id="import-network" value="testnet4">
+    <button class="btn" onclick="importTx()" data-i18n="import_btn" style="flex: 0 0 auto;">Import</button>
+</div>
+                </div>
+
+                <div class="section">
+                    <div class="section-header">
+                        <h2>&#128203; <span data-i18n="pool_title">Transaction Pool</span></h2>
+                        <button class="btn btn-outline btn-sm" onclick="refresh()" data-i18n="pool_refresh">Refresh</button>
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th data-i18n="pool_th_poolid">Pool ID</th>
+                                <th data-i18n="pool_th_txid">TXID</th>
+                                <th data-i18n="pool_th_status">Status</th>
+                                <th data-i18n="pool_th_type">Type</th>
+                                <th data-i18n="pool_th_scheduled">Scheduled</th>
+                                <th data-i18n="pool_th_actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tx-list">
+                            <tr><td colspan="6" class="empty" data-i18n="pool_empty">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="page-settings" class="page">
+            <div class="container">
+                <div class="section">
+                    <div class="section-header">
+                        <h2>&#9881; <span data-i18n="cfg_title">Configuration</span></h2>
+                    </div>
+                    <div class="settings-grid">
+                        <div class="setting-group">
+                            <label data-i18n="cfg_wallet_title">Wallet Connection</label>
+                            <div style="background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px;">
+                                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                                    <span style="width: 12px; height: 12px; border-radius: 50%; background: var(--btc); box-shadow: 0 0 8px var(--btc-dim);"></span>
+                                    <span style="font-family: var(--font-mono); color: var(--btc);" data-i18n="cfg_connected">Connected</span>
+                                </div>
+                                <div style="font-size: 13px; color: var(--text-dim); margin-bottom: 8px;" data-i18n="cfg_wallet_hint">
+                                    Configure Sparrow or Liana to connect here (Electrum server)
+                                </div>
+                                <div style="font-family: var(--font-mono); font-size: 15px; color: var(--btc); padding: 10px 14px; background: var(--bg-card); border-radius: 8px; border: 1px solid var(--border); margin-bottom: 8px; cursor: pointer;" id="wallet-url" onclick="copyWalletUrl('wallet-url')" title="Click to copy">-</div>
+                                <div style="font-size: 12px; color: var(--amber); margin-bottom: 8px;" data-i18n="cfg_wallet_warning">Use your Umbrel LAN IP (same as in the browser). Do not use the electrs indexer.</div>
+                                <div style="font-size: 12px; color: var(--text-dim); margin-top: 4px;" data-i18n="cfg_wallet_url">
+                                    Use this URL in your wallet server settings
+                                </div>
+                                <button type="button" class="btn btn-outline btn-sm" style="margin-top: 12px;" onclick="openWizard(true)" data-i18n="wizard_show_again">Show guide again</button>
+                            </div>
+                        </div>
+                        <div class="setting-group">
+                            <label data-i18n="cfg_indexer_status">Indexer Status</label>
+                            <div style="background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px;">
+                                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+                                    <span id="indexer-status-dot" style="width: 12px; height: 12px; border-radius: 50%; background: var(--text-dim);"></span>
+                                    <span id="indexer-status-text" style="font-family: var(--font-mono); color: var(--text-dim);" data-i18n="cfg_checking">Checking...</span>
+                                </div>
+                                <div id="indexer-height" style="font-family: var(--font-mono); font-size: 14px;"></div>
+                                <div id="indexer-status-hint" style="font-size: 12px; color: var(--text-dim); margin-top: 4px;" data-i18n="cfg_indexer_status_hint">
+                                    Backend Electrs/Fulcrum connection
+                                </div>
+                            </div>
+                        </div>
+                        <div class="setting-group">
+                            <label data-i18n="cfg_broadcast_mode">Broadcast Mode</label>
+                            <select id="cfg-broadcast-mode" onchange="toggleScheduledFields()" style="width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 16px 20px; border-radius: 12px; font-family: var(--font-mono); font-size: 16px;">
+                                <option value="immediate" data-i18n="cfg_mode_immediate">Immediate</option>
+                                <option value="scheduled" data-i18n="cfg_mode_scheduled">Scheduled (by time)</option>
+                                <option value="by_block" data-i18n="cfg_mode_by_block">By Block Height</option>
+                            </select>
+                            <div class="setting-hint" data-i18n="cfg_mode_hint">How transactions from your wallet are broadcast</div>
+                        </div>
+                        <div class="setting-group" id="cfg-delay-group">
+                            <label data-i18n="cfg_default_delay">Default Delay (hours)</label>
+                            <input type="number" id="cfg-default-delay" min="1" max="168">
+                            <div class="setting-hint" data-i18n="cfg_delay_hint">For scheduled mode, delay before broadcast</div>
+                        </div>
+                        <div class="setting-group" id="cfg-scheduled-datetime-group">
+                            <label data-i18n="cfg_scheduled_datetime">Scheduled Date & Time (optional)</label>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <input type="datetime-local" id="cfg-scheduled-datetime" style="flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 16px 20px; border-radius: 12px; font-family: var(--font-mono); font-size: 16px;">
+                                <button class="btn btn-outline" onclick="document.getElementById('cfg-scheduled-datetime').value=''" style="white-space: nowrap;" data-i18n="cfg_clear">Clear</button>
+                            </div>
+                            <div class="setting-hint" data-i18n="cfg_scheduled_hint">If set, overrides delay. Leave empty to use delay hours</div>
+                        </div>
+                        <div class="setting-group" id="cfg-external-indexer-group">
+                            <label data-i18n="cfg_indexer_external">External Indexer (optional)</label>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <input type="text" id="cfg-electrs" placeholder="host:50001 or host:50002" style="flex: 1;">
+                                <button class="btn btn-outline" id="btn-test-indexer" onclick="testIndexer()" style="padding: 16px 20px; white-space: nowrap;" data-i18n="cfg_indexer_test">Test</button>
+                                <button class="btn btn-outline" id="btn-discover-indexer" onclick="discoverIndexer()" style="padding: 16px 20px; white-space: nowrap; display: none;" data-i18n="cfg_indexer_discover">Discover</button>
+                            </div>
+                            <label style="display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 14px; cursor: pointer;">
+                                <input type="checkbox" id="cfg-indexer-ssl" style="width: 16px; height: 16px; accent-color: var(--btc);">
+                                <span data-i18n="cfg_indexer_ssl">Use SSL/TLS</span>
+                            </label>
+                            <div class="setting-hint" id="indexer-test-result" style="margin-top: 8px; display: none;"></div>
+                            <div class="setting-hint" id="indexer-auto-hint" style="margin-top: 8px; display: none;"></div>
+                            <div class="setting-hint" id="indexer-fallback-hint" data-i18n="cfg_indexer_fallback_hint">Only if the node indexer fails — leave empty to use the node automatically.</div>
+                        </div>
+                        <div class="setting-group">
+                            <label data-i18n="cfg_min_delay">Min Delay (hours)</label>
+                            <input type="number" id="cfg-min-delay" min="0" max="168">
+                            <div class="setting-hint" data-i18n="cfg_min_delay_hint">Minimum random delay before broadcast</div>
+                        </div>
+                        <div class="setting-group">
+                            <label data-i18n="cfg_max_delay">Max Delay (hours)</label>
+                            <input type="number" id="cfg-max-delay" min="0" max="168">
+                            <div class="setting-hint" data-i18n="cfg_max_delay_hint">Maximum random delay before broadcast</div>
+                        </div>
+                    </div>
+                    <div class="settings-footer">
+                        <button class="btn btn-outline" onclick="loadConfig()" data-i18n="cfg_reset">Reset</button>
+                        <button class="btn" style="background: var(--green);" onclick="saveConfig()" data-i18n="cfg_save">Save Settings</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detail Modal -->
+    <div class="modal-overlay" id="modal-overlay" onclick="if(event.target===this)closeModal()">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 data-i18n="detail_title">Transaction Details</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+            <div class="detail-actions" id="modal-actions"></div>
+        </div>
+    </div>
+
+    <!-- Schedule Modal -->
+    <div class="modal-overlay" id="schedule-overlay" onclick="if(event.target===this)closeScheduleModal()">
+        <div class="modal" style="max-width: 480px;">
+            <div class="modal-header">
+                <h3>&#128197; <span id="sch-title" data-i18n="sch_title">Schedule Broadcast</span></h3>
+                <button class="modal-close" onclick="closeScheduleModal()">&times;</button>
+            </div>
+<div class="modal-body">
+    <input type="hidden" id="sch-tx-id">
+    <input type="hidden" id="sch-trigger-type" value="datetime">
+    <div id="sch-trigger-tabs" style="display: none; gap: 8px; margin-bottom: 16px;">
+        <button type="button" class="btn btn-outline btn-sm sch-tab-btn" id="sch-tab-datetime" onclick="setSchTrigger('datetime')" data-i18n="sch_tab_datetime">Date &amp; Time</button>
+        <button type="button" class="btn btn-outline btn-sm sch-tab-btn" id="sch-tab-price" onclick="setSchTrigger('price')" data-i18n="sch_tab_price">Fiat Price</button>
+    </div>
+    <div id="sch-nlocktime-banner" style="display: none; margin-bottom: 16px; padding: 12px 14px; border-radius: 10px; background: #FF6B6B18; border: 1px solid #FF6B6B44; color: #FFB4B4; font-size: 13px; line-height: 1.45;" data-i18n="sch_nlocktime_warning">
+        The nLockTime in the signed transaction does not change; the network will only accept the TX when chain MTP reaches it.
+    </div>
+    <div id="sch-datetime-panel">
+    <div class="setting-group" style="margin-bottom: 20px;">
+        <label data-i18n="sch_datetime">Broadcast Date &amp; Time</label>
+        <input type="datetime-local" id="sch-datetime" style="
+            width: 100%;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 16px 20px;
+            border-radius: 12px;
+            font-family: var(--font-mono);
+            font-size: 16px;
+        ">
+        <div class="setting-hint" data-i18n="sch_datetime_hint">Exact date and time to broadcast this transaction</div>
+    </div>
+    <div style="display: flex; gap: 8px; margin-top: 10px;">
+        <button class="btn btn-outline" style="flex:1;" onclick="setScheduleNow()" data-i18n="sch_now">Now (random delay)</button>
+        <button class="btn btn-outline" style="flex:1;" onclick="setScheduleTomorrow()" data-i18n="sch_tomorrow">Tomorrow</button>
+        <button class="btn btn-outline" style="flex:1;" onclick="setScheduleNextWeek()" data-i18n="sch_next_week">Next week</button>
+    </div>
+    </div>
+    <div id="sch-price-panel" style="display: none;">
+        <div class="setting-group" style="margin-bottom: 16px;">
+            <label data-i18n="sch_price_target">Target BTC price</label>
+            <input type="number" id="sch-target-price" min="0" step="0.01" placeholder="95000" style="width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 16px 20px; border-radius: 12px; font-family: var(--font-mono); font-size: 16px;">
+        </div>
+        <div class="setting-group" style="margin-bottom: 16px;">
+            <label data-i18n="sch_price_currency">Currency</label>
+            <select id="sch-price-currency" onchange="updateSchPriceDisplay()" style="width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 16px 20px; border-radius: 12px; font-family: var(--font-mono); font-size: 16px;">
+                <option value="eur">EUR</option>
+                <option value="usd">USD</option>
+            </select>
+        </div>
+        <div class="setting-group" style="margin-bottom: 16px;">
+            <label data-i18n="sch_price_condition">Condition</label>
+            <select id="sch-price-condition" style="width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 16px 20px; border-radius: 12px; font-family: var(--font-mono); font-size: 16px;">
+                <option value="above" data-i18n="sch_price_above">Broadcast when price is above target</option>
+                <option value="below" data-i18n="sch_price_below">Broadcast when price is below target</option>
+            </select>
+        </div>
+        <div class="setting-hint" id="sch-price-current" data-i18n="sch_price_hint">TX stays pending until the condition is met (checked every 60s).</div>
+        <div id="sch-price-live" style="margin-top: 10px; padding: 12px 14px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); font-family: var(--font-mono); font-size: 14px; color: var(--btc); display: none;"></div>
+    </div>
+</div>
+            <div class="detail-actions">
+                <button class="btn btn-outline" onclick="closeScheduleModal()" data-i18n="sch_cancel">Cancel</button>
+                <button class="btn" id="sch-confirm-btn" onclick="confirmSchedule()" data-i18n="sch_confirm">Schedule</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <!-- Restart Modal -->
+    <div class="modal-overlay" id="restart-overlay">
+        <div class="modal" style="max-width: 400px;">
+            <div class="modal-header">
+                <h3>&#9888; <span data-i18n="restart_title">Restarting...</span></h3>
+            </div>
+            <div class="modal-body" style="text-align: center;">
+                <p style="margin-bottom: 16px;" data-i18n="restart_msg">The application will restart automatically.</p>
+                <p style="font-size: 24px; font-family: var(--font-mono); color: var(--btc);" id="restart-countdown">10</p>
+                <p style="color: var(--text-dim);" data-i18n="restart_seconds">seconds to reload</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Network Change Restart Modal -->
+    <div class="modal-overlay" id="network-restart-overlay">
+        <div class="modal" style="max-width: 400px;">
+            <div class="modal-header">
+                <h3>&#9888; <span data-i18n="network_restart_title">Restart Required</span></h3>
+            </div>
+            <div class="modal-body" style="text-align: center;">
+                <p style="margin-bottom: 16px;" data-i18n="network_restart_msg1">You have changed the network.</p>
+                <p style="color: var(--text-dim); margin-bottom: 16px;" data-i18n="network_restart_msg2">Please restart broadcast-pool manually to apply changes.</p>
+                <p style="font-family: var(--font-mono); font-size: 13px; background: var(--bg); padding: 12px; border-radius: 8px;">
+                    <span data-i18n="network_restart_hint">Press Ctrl+C to stop, then</span><br/>
+                    <code style="color: var(--btc);">./broadcast-pool start</code>
+                </p>
+            </div>
+            <div class="detail-actions">
+                <button class="btn" onclick="closeNetworkRestartModal()" data-i18n="network_restart_btn">Understood</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Onboarding wizard -->
+    <div class="modal-overlay wizard-overlay" id="wizard-overlay" onclick="if(event.target===this)closeWizard(false)">
+        <div class="modal wizard-modal" role="dialog" aria-labelledby="wizard-title">
+            <div class="modal-header">
+                <h3 id="wizard-title">&#9889; <span data-i18n="wizard_title">Quick Guide</span></h3>
+                <button type="button" class="modal-close" onclick="closeWizard(false)" aria-label="Close">&times;</button>
+            </div>
+            <div class="wizard-progress" id="wizard-progress">
+                <span class="wizard-dot active" data-dot="0"></span>
+                <span class="wizard-dot" data-dot="1"></span>
+                <span class="wizard-dot" data-dot="2"></span>
+                <span class="wizard-dot" data-dot="3"></span>
+            </div>
+            <div class="wizard-step-counter" id="wizard-step-counter"></div>
+            <div class="wizard-body">
+                <div class="wizard-step active" data-wizard-step="0">
+                    <p class="wizard-lead" data-i18n="wizard_s1_lead">Broadcast Pool retains your transactions and broadcasts them when you choose: by time, block height, BTC price, or immediately.</p>
+                    <div class="wizard-flow" data-i18n="wizard_s1_flow">Wallet → :50050 → Broadcast Pool → pending → Bitcoin network</div>
+                    <p class="wizard-lead" style="margin-bottom: 0;" data-i18n="wizard_s1_note">Connect your wallet to the Electrum server URL shown in Settings — not the electrs indexer.</p>
+                </div>
+                <div class="wizard-step" data-wizard-step="1">
+                    <p class="wizard-lead" data-i18n="wizard_s2_lead">Behaviour depends on the nLockTime set when Sparrow signs the transaction.</p>
+                    <div class="wizard-card sparrow">
+                        <h4 data-i18n="wizard_sparrow_title">Sparrow</h4>
+                        <ul>
+                            <li data-i18n="wizard_sparrow_1">nLockTime = 0 — TX stays pending. Schedule by date/time or BTC price (EUR/USD).</li>
+                            <li data-i18n="wizard_sparrow_2">nLockTime = date (MTP) — follows global mode in Settings. Reschedule if MTP delays broadcast.</li>
+                            <li data-i18n="wizard_sparrow_3">nLockTime = block height — broadcasts when the chain reaches that height.</li>
+                        </ul>
+                        <p class="wizard-tip" data-i18n="wizard_sparrow_tip">Fiat price trigger only when nLockTime is disabled (0).</p>
+                    </div>
+                </div>
+                <div class="wizard-step" data-wizard-step="2">
+                    <p class="wizard-lead" data-i18n="wizard_s3_lead">Use the same Electrum port (:50050). Cycle transactions arrive as pending for manual scheduling.</p>
+                    <div class="wizard-card liana">
+                        <h4 data-i18n="wizard_liana_title">Liana</h4>
+                        <ul>
+                            <li data-i18n="wizard_liana_1">Refresh / cycle TX stays pending. Schedule the broadcast date (e.g. before timelock expiry).</li>
+                            <li data-i18n="wizard_liana_2">Anti-fee-sniping uses a recent block height in nLockTime — scheduling still works.</li>
+                            <li data-i18n="wizard_liana_3">Policy timelock (CSV in miniscript) is not read by Broadcast Pool.</li>
+                        </ul>
+                        <p class="wizard-tip" data-i18n="wizard_liana_tip">Date/time only — no fiat price trigger for Liana.</p>
+                    </div>
+                </div>
+                <div class="wizard-step" data-wizard-step="3">
+                    <p class="wizard-lead" data-i18n="wizard_s4_lead">Global settings apply to transactions with a real locktime in the TX itself (not manual pending ones).</p>
+                    <div class="wizard-card settings">
+                        <h4 data-i18n="wizard_settings_title">Settings</h4>
+                        <ul>
+                            <li data-i18n="wizard_settings_1">Broadcast mode: Immediate, Scheduled, or By block height.</li>
+                            <li data-i18n="wizard_settings_2">Wallet URL: use Host:50050 from Settings (not electrs).</li>
+                            <li data-i18n="wizard_settings_3">BTC prices checked every 60s (Kraken, CoinGecko, Bitstamp).</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="wizard-footer">
+                <label class="wizard-dismiss">
+                    <input type="checkbox" id="wizard-dismiss-check">
+                    <span data-i18n="wizard_dismiss">Don't show this guide again</span>
+                </label>
+                <div class="wizard-actions">
+                    <button type="button" class="wizard-skip" onclick="closeWizard(true)" data-i18n="wizard_skip">Skip guide</button>
+                    <div class="wizard-nav-btns">
+                        <button type="button" class="btn btn-outline" id="wizard-prev-btn" onclick="wizardPrev()" data-i18n="wizard_prev">Back</button>
+                        <button type="button" class="btn" id="wizard-next-btn" onclick="wizardNext()" data-i18n="wizard_next">Next</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allTxs = [];
+        let currentLang = localStorage.getItem('bp-lang') || 'en';
+        let cachedBtcPrices = {};
+        let cachedPriceSource = '';
+        let cachedPriceStale = false;
+        const WIZARD_STORAGE_KEY = 'bp-wizard-v1';
+        const WIZARD_STEP_COUNT = 4;
+        let wizardStep = 0;
+
+        const i18n = {
+            en: {
+                nav_dashboard: 'Dashboard', nav_settings: 'Settings',
+                stat_block_height: 'Block Height', stat_loading: 'Loading...',
+                stat_pending: 'Pending', stat_pending_sub: 'Waiting to schedule',
+                stat_scheduled: 'Scheduled', stat_scheduled_sub: 'Timed for broadcast',
+                stat_broadcast: 'Broadcast', stat_broadcast_sub: 'In mempool',
+                stat_confirmed: 'Confirmed', stat_confirmed_sub: 'In blockchain',
+                stat_mempool: 'Mempool', stat_mempool_sub: 'Network fee congestion',
+                stat_mempool_unavailable: 'Bitcoin node not connected',
+                stat_mempool_cong_low: 'Low', stat_mempool_cong_medium: 'Medium', stat_mempool_cong_high: 'High',
+                stat_total: 'Total', stat_total_sub: 'All transactions',
+                stat_value: 'Value', stat_value_sub: 'BTC in pool',
+                stat_btc_price: 'BTC Price', stat_btc_price_sub: 'Live spot price',
+                stat_btc_price_stale: 'Cached price',
+                import_title: 'Import Transaction', import_hex: 'Raw transaction hex (02000000...)', import_label: 'Label (optional)', import_fee: 'Target Fee (sat/vB)', import_btn: 'Import', import_schedule_all: 'Schedule All',
+                pool_title: 'Transaction Pool', pool_refresh: 'Refresh',
+                pool_th_poolid: 'Pool ID', pool_th_txid: 'TXID', pool_th_status: 'Status', pool_th_type: 'Type', pool_th_scheduled: 'Scheduled', pool_th_actions: 'Actions',
+                pool_empty: 'No transactions in pool. Import a signed TX to get started.',
+                btn_view_details: 'View details', btn_waiting_block: 'waiting for block', btn_waiting_locktime: 'waiting locktime', btn_deferred_mtp: 'deferred — MTP pending', btn_reschedule: 'Reschedule', btn_schedule: 'Schedule', btn_remove: 'Remove', btn_retry: 'Retry',
+                cfg_title: 'Configuration',
+                cfg_server_status: 'Server Status', cfg_connected: 'Connected', cfg_disconnected: 'Disconnected',
+                cfg_electrum_hint: 'Electrum server for your wallet', cfg_use_url: 'Use this URL in your wallet settings',
+                cfg_indexer_status: 'Indexer Status', cfg_checking: 'Checking...', cfg_connected_to: 'Connected to Electrs/Fulcrum',
+                cfg_broadcast_mode: 'Broadcast Mode', cfg_mode_immediate: 'Immediate', cfg_mode_scheduled: 'Scheduled (by time)', cfg_mode_by_block: 'By Block Height',
+                cfg_mode_hint: 'Wallet transactions are retained in the virtual mempool; the scheduler broadcasts per this mode',
+                cfg_scheduled_datetime: 'Scheduled Date & Time (optional)',
+                cfg_scheduled_hint: 'If set, overrides delay. Leave empty to use random delay hours',
+                cfg_clear: 'Clear',
+                protocol_banner_title: 'Virtual Mempool Active',
+                protocol_banner_text: 'Transactions from your wallet are retained locally and shown as pending. Broadcast happens when the scheduler triggers (time, block, price, or immediate).',
+                cfg_default_delay: 'Default Delay (hours)', cfg_delay_hint: 'For scheduled mode, delay before broadcast',
+                cfg_indexer_server: 'Indexer Server', cfg_indexer_external: 'External Indexer (optional)', cfg_indexer_test: 'Test', cfg_indexer_discover: 'Discover',
+                cfg_indexer_status_hint: 'Connects automatically to the node electrs on Umbrel (internal Docker IP).',
+                cfg_indexer_status_hint_dev: 'Electrs/Fulcrum TCP (ports 50001 or 50002). Auto-detected at startup.',
+                cfg_indexer_fallback_hint: 'Only if the node indexer fails — leave empty to use the node automatically.',
+                cfg_indexer_ssl: 'Use SSL/TLS',
+                cfg_indexer_auto: 'Node indexer',
+                cfg_indexer_node: 'Connected to node indexer',
+                cfg_lan_ip: 'LAN IP (wallet URL)', cfg_lan_ip_hint: 'Auto-detected at startup. Override if Sparrow cannot connect (same IP as http://umbrel).',
+                cfg_wallet_sparrow: 'Sparrow / general', cfg_wallet_liana: 'Liana (dedicated port)',
+                cfg_network: 'Network', cfg_network_hint: 'Detected from Bitcoin Core at startup; override if needed', cfg_network_warning: 'Network change requires daemon restart',
+                cfg_min_delay: 'Min Delay (hours)', cfg_min_delay_hint: 'Minimum random delay before broadcast',
+                cfg_max_delay: 'Max Delay (hours)', cfg_max_delay_hint: 'Maximum random delay before broadcast',
+                cfg_reset: 'Reset', cfg_save: 'Save Settings',
+                cfg_wallet_title: 'Wallet Connection', cfg_wallet_hint: 'Configure your wallet to connect to Broadcast Pool here', cfg_wallet_url: 'Use this URL in your wallet server settings', cfg_wallet_warning: 'Use your Umbrel LAN IP (same as in the browser). Do not use the electrs indexer.',
+                detail_title: 'Transaction Details', detail_pool_id: 'Pool ID', detail_status: 'Status', detail_network: 'Network',
+                detail_scheduled: 'Scheduled', detail_fee_rate: 'Fee Rate',
+                detail_utxos: 'UTXOs', detail_broadcast_at: 'Broadcast At', detail_confirmed_at: 'Confirmed At',
+                detail_block_height: 'Block Height', detail_created: 'Created', detail_raw_hex: 'Raw TX Hex', detail_error: 'Error',
+                detail_nlocktime: 'nLockTime (required)', detail_chain_mtp: 'Chain MTP', detail_locktime_remaining: 'Est. remaining',
+                detail_locktime_hint: 'Signet blocks slowly: broadcast happens when chain MTP reaches nLockTime, not at wall-clock schedule time.',
+                detail_deferred_title: 'Deferred broadcast — MTP pending',
+                detail_original_scheduled: 'Originally scheduled',
+                detail_missed_at: 'First missed attempt',
+                detail_next_attempt: 'Next attempt',
+                detail_locktime_ready: 'ready',
+                detail_programmed: 'Programmed', detail_scheduled_label: 'scheduled', detail_by_block_label: 'scheduled — Block #', detail_immediate_label: 'Immediate',
+                detail_view_mempool: 'View on mempool', detail_copy_poolid: 'Copy Pool ID', detail_copy_txid: 'Copy TXID', detail_copy_hex: 'Copy TX Hex',
+                sch_title: 'Schedule Broadcast', sch_reschedule_title: 'Reschedule Broadcast',
+                sch_nlocktime_warning: 'The nLockTime in the signed transaction does not change; the network will only accept the TX when chain MTP reaches it.',
+                sch_datetime: 'Broadcast Date & Time', sch_datetime_hint: 'Exact date and time to broadcast this transaction',
+                sch_tab_datetime: 'Date & Time', sch_tab_price: 'Fiat Price',
+                sch_price_target: 'Target BTC price', sch_price_currency: 'Currency',
+                sch_price_condition: 'Condition', sch_price_above: 'Broadcast when price is above target',
+                sch_price_below: 'Broadcast when price is below target', sch_price_hint: 'TX stays pending until the condition is met (checked every 60s).',
+                sch_price_now: 'Current', sch_price_live: 'Live BTC price', sch_price_invalid: 'Enter a valid target price',
+                sch_price_source: 'Source', sch_price_stale: 'stale cache',
+                detail_manual_waiting: 'Awaiting manual schedule',
+                sch_now: 'Now (random delay)', sch_tomorrow: 'Tomorrow', sch_next_week: 'Next week',
+                sch_cancel: 'Cancel', sch_confirm: 'Schedule', sch_reschedule_confirm: 'Reschedule',
+                toast_copied: 'Copied!', toast_imported: 'Transaction imported', toast_import_fail: 'Import failed',
+                toast_scheduled: 'Transaction scheduled', toast_rescheduled: 'Broadcast rescheduled', toast_removed: 'Transaction removed', toast_saved: 'Settings saved', toast_retried: 'Transaction requeued for retry',
+                toast_enter_hex: 'Enter transaction hex', toast_select_date: 'Select a date and time',
+                restart_title: 'Restarting...', restart_msg: 'The application will restart automatically.', restart_seconds: 'seconds to reload',
+                network_restart_title: 'Restart Required', network_restart_msg1: 'You have changed the network.', network_restart_msg2: 'Please restart broadcast-pool manually to apply changes.',
+                network_restart_hint: 'Press Ctrl+C to stop, then', network_restart_cmd: './broadcast-pool start',
+                network_restart_btn: 'Understood',
+                wizard_title: 'Quick Guide',
+                wizard_s1_lead: 'Broadcast Pool retains your transactions and broadcasts them when you choose: by time, block height, BTC price, or immediately.',
+                wizard_s1_flow: 'Wallet \u2192 :50050 \u2192 Broadcast Pool \u2192 pending \u2192 Bitcoin network',
+                wizard_s1_note: 'Connect your wallet to the Electrum server URL in Settings \u2014 not the electrs indexer.',
+                wizard_s2_lead: 'Behaviour depends on the nLockTime set when Sparrow signs the transaction.',
+                wizard_sparrow_title: 'Sparrow',
+                wizard_sparrow_1: 'nLockTime = 0 \u2014 TX stays pending. Schedule by date/time or BTC price (EUR/USD).',
+                wizard_sparrow_2: 'nLockTime = date (MTP) \u2014 follows global mode in Settings. Reschedule if MTP delays broadcast.',
+                wizard_sparrow_3: 'nLockTime = block height \u2014 broadcasts when the chain reaches that height.',
+                wizard_sparrow_tip: 'Fiat price trigger only when nLockTime is disabled (0).',
+                wizard_s3_lead: 'Use the same Electrum port (:50050). Cycle transactions arrive as pending for manual scheduling.',
+                wizard_liana_title: 'Liana',
+                wizard_liana_1: 'Refresh / cycle TX stays pending. Schedule the broadcast date (e.g. before timelock expiry).',
+                wizard_liana_2: 'Anti-fee-sniping uses a recent block height in nLockTime \u2014 scheduling still works.',
+                wizard_liana_3: 'Policy timelock (CSV in miniscript) is not read by Broadcast Pool.',
+                wizard_liana_tip: 'Date/time only \u2014 no fiat price trigger for Liana.',
+                wizard_s4_lead: 'Global settings apply to transactions with a real locktime in the TX itself (not manual pending ones).',
+                wizard_settings_title: 'Settings',
+                wizard_settings_1: 'Broadcast mode: Immediate, Scheduled, or By block height.',
+                wizard_settings_2: 'Wallet URL: use Host:50050 from Settings (not electrs).',
+                wizard_settings_3: 'BTC prices checked every 60s (Kraken, CoinGecko, Bitstamp).',
+                wizard_dismiss: 'Don\u2019t show this guide again',
+                wizard_skip: 'Skip guide',
+                wizard_prev: 'Back',
+                wizard_next: 'Next',
+                wizard_finish: 'Get started',
+                wizard_step_of: 'Step {n} of {total}',
+                wizard_show_again: 'Show guide again',
+            },
+            es: {
+                nav_dashboard: 'Panel', nav_settings: 'Configuraci\u00f3n',
+                stat_block_height: 'Altura del Bloque', stat_loading: 'Cargando...',
+                stat_pending: 'Pendiente', stat_pending_sub: 'Esperando para programar',
+                stat_scheduled: 'Programada', stat_scheduled_sub: 'Programada para transmisi\u00f3n',
+                stat_broadcast: 'Transmitida', stat_broadcast_sub: 'En mempool',
+                stat_confirmed: 'Confirmada', stat_confirmed_sub: 'En blockchain',
+                stat_mempool: 'Mempool', stat_mempool_sub: 'Congesti\u00f3n de fees en red',
+                stat_mempool_unavailable: 'Nodo Bitcoin no conectado',
+                stat_mempool_cong_low: 'Baja', stat_mempool_cong_medium: 'Media', stat_mempool_cong_high: 'Alta',
+                stat_total: 'Total', stat_total_sub: 'Todas las transacciones',
+                stat_value: 'Valor', stat_value_sub: 'BTC en el pool',
+                stat_btc_price: 'Precio BTC', stat_btc_price_sub: 'Precio spot en vivo',
+                stat_btc_price_stale: 'Precio en cach\u00e9',
+                import_title: 'Importar Transacci\u00f3n', import_hex: 'Hex de transacci\u00f3n cruda (02000000...)', import_label: 'Etiqueta (opcional)', import_fee: 'Tarifa Objetivo (sat/vB)', import_btn: 'Importar', import_schedule_all: 'Programar Todas',
+                pool_title: 'Pool de Transacciones', pool_refresh: 'Actualizar',
+                pool_th_poolid: 'ID del Pool', pool_th_txid: 'TXID', pool_th_status: 'Estado', pool_th_type: 'Tipo', pool_th_scheduled: 'Programada', pool_th_actions: 'Acciones',
+                pool_empty: 'No hay transacciones en el pool. Importa una TX firmada para comenzar.',
+                btn_view_details: 'Ver detalles', btn_waiting_block: 'esperando bloque', btn_waiting_locktime: 'esperando locktime', btn_deferred_mtp: 'diferida — MTP pendiente', btn_reschedule: 'Reprogramar', btn_schedule: 'Programar', btn_remove: 'Eliminar', btn_retry: 'Reintentar',
+                cfg_title: 'Configuraci\u00f3n',
+                cfg_server_status: 'Estado del Servidor', cfg_connected: 'Conectado', cfg_disconnected: 'Desconectado',
+                cfg_electrum_hint: 'Servidor Electrum para tu wallet', cfg_use_url: 'Usar esta URL en la configuraci\u00f3n de tu wallet',
+                cfg_indexer_status: 'Estado del Indexer', cfg_checking: 'Verificando...', cfg_connected_to: 'Conectado a Electrs/Fulcrum',
+                cfg_broadcast_mode: 'Modo de Transmisi\u00f3n', cfg_mode_immediate: 'Inmediato', cfg_mode_scheduled: 'Programada (por tiempo)', cfg_mode_by_block: 'Por Altura de Bloque',
+                cfg_mode_hint: 'Las TX de la wallet se retienen en el mempool virtual; el scheduler transmite seg\u00fan este modo',
+                cfg_scheduled_datetime: 'Fecha y Hora Programada (opcional)',
+                cfg_scheduled_hint: 'Si se define, anula el retraso. Dejar vac\u00edo para usar horas aleatorias',
+                cfg_clear: 'Limpiar',
+                protocol_banner_title: 'Mempool Virtual Activo',
+                protocol_banner_text: 'Las transacciones de tu wallet se retienen localmente y aparecen como pendientes. La transmisi\u00f3n ocurre cuando el scheduler lo dispara (tiempo, bloque, precio o inmediato).',
+                cfg_default_delay: 'Retraso Predeterminado (horas)', cfg_delay_hint: 'Para modo programado, retraso antes de transmisi\u00f3n',
+                cfg_indexer_server: 'Servidor Indexer', cfg_indexer_external: 'Indexador externo (opcional)', cfg_indexer_test: 'Probar', cfg_indexer_discover: 'Detectar',
+                cfg_indexer_status_hint: 'Se conecta autom\u00e1ticamente al electrs del nodo Umbrel (IP Docker interna).',
+                cfg_indexer_status_hint_dev: 'Electrs/Fulcrum TCP (puertos 50001 o 50002). Auto-detectado al arrancar.',
+                cfg_indexer_fallback_hint: 'Solo si el indexador del nodo falla — dejar vac\u00edo para usar el del nodo autom\u00e1ticamente.',
+                cfg_indexer_ssl: 'Usar SSL/TLS',
+                cfg_indexer_auto: 'Indexador del nodo',
+                cfg_indexer_node: 'Conectado al indexador del nodo',
+                cfg_lan_ip: 'IP LAN (URL wallet)', cfg_lan_ip_hint: 'Auto-detectada al arrancar. Override si Sparrow no conecta (misma IP que http://umbrel).',
+                cfg_wallet_sparrow: 'Sparrow / general', cfg_wallet_liana: 'Liana (puerto dedicado)',
+                cfg_network: 'Red', cfg_network_hint: 'Detectada desde Bitcoin Core al arrancar; override si hace falta', cfg_network_warning: 'El cambio de red requiere reinicio del daemon',
+                cfg_min_delay: 'Retraso M\u00ednimo (horas)', cfg_min_delay_hint: 'Retraso aleatorio m\u00ednimo antes de transmisi\u00f3n',
+                cfg_max_delay: 'Retraso M\u00e1ximo (horas)', cfg_max_delay_hint: 'Retraso aleatorio m\u00e1ximo antes de transmisi\u00f3n',
+                cfg_reset: 'Restablecer', cfg_save: 'Guardar Configuraci\u00f3n',
+                cfg_wallet_title: 'Conexi\u00f3n Wallet', cfg_wallet_hint: 'Configura tu wallet para conectarse aqu\u00ed', cfg_wallet_url: 'Usar esta URL en la configuraci\u00f3n del servidor de tu wallet', cfg_wallet_warning: 'Usa la IP LAN de Umbrel (la misma del navegador). No uses el indexer electrs.',
+                detail_title: 'Detalles de Transacci\u00f3n', detail_pool_id: 'ID del Pool', detail_status: 'Estado', detail_network: 'Red',
+                detail_scheduled: 'Programada', detail_fee_rate: 'Tarifa',
+                detail_utxos: 'UTXOs', detail_broadcast_at: 'Transmitida el', detail_confirmed_at: 'Confirmada el',
+                detail_block_height: 'Altura del Bloque', detail_created: 'Creada', detail_raw_hex: 'Hex TX Crudo', detail_error: 'Error',
+                detail_nlocktime: 'nLockTime (requerido)', detail_chain_mtp: 'MTP de cadena', detail_locktime_remaining: 'Tiempo restante est.',
+                detail_locktime_hint: 'Signet mina lento: la transmisi\u00f3n ocurre cuando el MTP de cadena alcanza el nLockTime, no a la hora programada del reloj.',
+                detail_deferred_title: 'Emisi\u00f3n diferida — MTP pendiente',
+                detail_original_scheduled: 'Programada originalmente',
+                detail_missed_at: 'Primer intento fallido',
+                detail_next_attempt: 'Pr\u00f3ximo intento',
+                detail_locktime_ready: 'listo',
+                detail_programmed: 'Programada', detail_scheduled_label: 'programada', detail_by_block_label: 'programada \u2014 Block #', detail_immediate_label: 'Inmediata',
+                detail_view_mempool: 'Ver en mempool', detail_copy_poolid: 'Copiar ID del Pool', detail_copy_txid: 'Copiar TXID', detail_copy_hex: 'Copiar Hex TX',
+                sch_title: 'Programar Transmisi\u00f3n', sch_reschedule_title: 'Reprogramar emisi\u00f3n',
+                sch_nlocktime_warning: 'El nLockTime de la TX firmada no cambia; la red solo aceptar\u00e1 la TX cuando el MTP de cadena lo alcance.',
+                sch_datetime: 'Fecha y Hora de Transmisi\u00f3n', sch_datetime_hint: 'Fecha y hora exacta para transmitir esta transacci\u00f3n',
+                sch_tab_datetime: 'Fecha y Hora', sch_tab_price: 'Precio Fiat',
+                sch_price_target: 'Precio objetivo BTC', sch_price_currency: 'Moneda',
+                sch_price_condition: 'Condici\u00f3n', sch_price_above: 'Emitir cuando el precio supere el objetivo',
+                sch_price_below: 'Emitir cuando el precio est\u00e9 por debajo del objetivo', sch_price_hint: 'La TX queda pendiente hasta cumplir la condici\u00f3n (comprobada cada 60s).',
+                sch_price_now: 'Actual', sch_price_live: 'Precio BTC en vivo', sch_price_invalid: 'Introduce un precio objetivo v\u00e1lido',
+                sch_price_source: 'Fuente', sch_price_stale: 'cach\u00e9 antigua',
+                detail_manual_waiting: 'Esperando programaci\u00f3n manual',
+                sch_now: 'Ahora (retraso aleatorio)', sch_tomorrow: 'Ma\u00f1ana', sch_next_week: 'Pr\u00f3xima semana',
+                sch_cancel: 'Cancelar', sch_confirm: 'Programar', sch_reschedule_confirm: 'Reprogramar',
+                toast_copied: '\u00a1Copiado!', toast_imported: 'Transacci\u00f3n importada', toast_import_fail: 'Error al importar',
+                toast_scheduled: 'Transacci\u00f3n programada', toast_rescheduled: 'Emisi\u00f3n reprogramada', toast_removed: 'Transacci\u00f3n eliminada', toast_saved: 'Configuraci\u00f3n guardada', toast_retried: 'Transacci\u00f3n reencolada para reintento',
+                toast_enter_hex: 'Ingresa el hex de la transacci\u00f3n', toast_select_date: 'Selecciona una fecha y hora',
+                restart_title: 'Reiniciando...', restart_msg: 'La aplicaci\u00f3n se reiniciar\u00e1 autom\u00e1ticamente.', restart_seconds: 'segundos para recarga',
+                network_restart_title: 'Reinicio Requerido', network_restart_msg1: 'Has cambiado la red.', network_restart_msg2: 'Por favor reinicia broadcast-pool manualmente para aplicar los cambios.',
+                network_restart_hint: 'Presiona Ctrl+C para detener, luego', network_restart_cmd: './broadcast-pool start',
+                network_restart_btn: 'Entendido',
+                wizard_title: 'Gu\u00eda r\u00e1pida',
+                wizard_s1_lead: 'Broadcast Pool retiene tus transacciones y las emite cuando t\u00fa decides: por hora, bloque, precio BTC o al instante.',
+                wizard_s1_flow: 'Wallet \u2192 :50050 \u2192 Broadcast Pool \u2192 pendiente \u2192 red Bitcoin',
+                wizard_s1_note: 'Conecta tu wallet a la URL Electrum en Configuraci\u00f3n \u2014 no al indexer electrs.',
+                wizard_s2_lead: 'El comportamiento depende del nLockTime con el que Sparrow firma la transacci\u00f3n.',
+                wizard_sparrow_title: 'Sparrow',
+                wizard_sparrow_1: 'nLockTime = 0 \u2014 TX pendiente. Programar por fecha/hora o precio BTC (EUR/USD).',
+                wizard_sparrow_2: 'nLockTime = fecha (MTP) \u2014 modo global en Configuraci\u00f3n. Reprogramar si el MTP retrasa la emisi\u00f3n.',
+                wizard_sparrow_3: 'nLockTime = altura de bloque \u2014 emite cuando la cadena alcanza esa altura.',
+                wizard_sparrow_tip: 'Trigger de precio fiat solo si nLockTime est\u00e1 desactivado (0).',
+                wizard_s3_lead: 'Mismo puerto Electrum (:50050). Las TX de ciclo llegan pendientes para programar manualmente.',
+                wizard_liana_title: 'Liana',
+                wizard_liana_1: 'TX de refresh/ciclo queda pendiente. Programa la fecha de emisi\u00f3n (p. ej. antes del vencimiento del timelock).',
+                wizard_liana_2: 'Anti-fee-sniping pone altura reciente en nLockTime \u2014 puedes programar igualmente.',
+                wizard_liana_3: 'El timelock de pol\u00edtica (CSV en miniscript) no lo lee Broadcast Pool.',
+                wizard_liana_tip: 'Solo fecha/hora \u2014 sin trigger de precio fiat en Liana.',
+                wizard_s4_lead: 'La configuraci\u00f3n global aplica a TX con locktime real en la transacci\u00f3n (no a las manuales pendientes).',
+                wizard_settings_title: 'Configuraci\u00f3n',
+                wizard_settings_1: 'Modo de transmisi\u00f3n: Inmediato, Programado o Por altura de bloque.',
+                wizard_settings_2: 'URL wallet: Host:50050 en Configuraci\u00f3n (no electrs).',
+                wizard_settings_3: 'Precios BTC cada 60s (Kraken, CoinGecko, Bitstamp).',
+                wizard_dismiss: 'No volver a mostrar esta gu\u00eda',
+                wizard_skip: 'Omitir gu\u00eda',
+                wizard_prev: 'Atr\u00e1s',
+                wizard_next: 'Siguiente',
+                wizard_finish: 'Empezar',
+                wizard_step_of: 'Paso {n} de {total}',
+                wizard_show_again: 'Ver gu\u00eda de nuevo',
+            }
+        };
+
+        function t(key) { return (i18n[currentLang] && i18n[currentLang][key]) || (i18n.en[key]) || key; }
+
+        function applyTranslations() {
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                el.textContent = t(key);
+            });
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+                const key = el.getAttribute('data-i18n-placeholder');
+                el.placeholder = t(key);
+            });
+            document.getElementById('lang-en').className = currentLang === 'en' ? 'lang-btn active' : 'lang-btn';
+            document.getElementById('lang-es').className = currentLang === 'es' ? 'lang-btn active' : 'lang-btn';
+            localStorage.setItem('bp-lang', currentLang);
+            updateWizardStep();
+            refresh();
+        }
+
+        function wizardStepLabel() {
+            return t('wizard_step_of')
+                .replace('{n}', String(wizardStep + 1))
+                .replace('{total}', String(WIZARD_STEP_COUNT));
+        }
+
+        function updateWizardStep() {
+            document.querySelectorAll('.wizard-step').forEach(el => {
+                el.classList.toggle('active', parseInt(el.getAttribute('data-wizard-step'), 10) === wizardStep);
+            });
+            document.querySelectorAll('.wizard-dot').forEach(el => {
+                const i = parseInt(el.getAttribute('data-dot'), 10);
+                el.classList.toggle('active', i === wizardStep);
+                el.classList.toggle('done', i < wizardStep);
+            });
+            const counter = document.getElementById('wizard-step-counter');
+            if (counter) counter.textContent = wizardStepLabel();
+            const prevBtn = document.getElementById('wizard-prev-btn');
+            const nextBtn = document.getElementById('wizard-next-btn');
+            if (prevBtn) prevBtn.style.visibility = wizardStep === 0 ? 'hidden' : 'visible';
+            if (nextBtn) nextBtn.textContent = wizardStep === WIZARD_STEP_COUNT - 1 ? t('wizard_finish') : t('wizard_next');
+        }
+
+        function openWizard(force) {
+            wizardStep = 0;
+            const chk = document.getElementById('wizard-dismiss-check');
+            if (chk) chk.checked = false;
+            updateWizardStep();
+            document.getElementById('wizard-overlay').classList.add('active');
+        }
+
+        function closeWizard(forceDismiss) {
+            if (forceDismiss || document.getElementById('wizard-dismiss-check')?.checked) {
+                localStorage.setItem(WIZARD_STORAGE_KEY, 'dismissed');
+            }
+            document.getElementById('wizard-overlay').classList.remove('active');
+        }
+
+        function showWizardIfNeeded() {
+            if (localStorage.getItem(WIZARD_STORAGE_KEY) === 'dismissed') return;
+            setTimeout(() => openWizard(false), 400);
+        }
+
+        function wizardNext() {
+            if (wizardStep < WIZARD_STEP_COUNT - 1) {
+                wizardStep++;
+                updateWizardStep();
+            } else {
+                closeWizard(false);
+            }
+        }
+
+        function wizardPrev() {
+            if (wizardStep > 0) {
+                wizardStep--;
+                updateWizardStep();
+            }
+        }
+
+        document.addEventListener('keydown', e => {
+            const overlay = document.getElementById('wizard-overlay');
+            if (!overlay?.classList.contains('active')) return;
+            if (e.key === 'Escape') { closeWizard(false); return; }
+            if (e.key === 'ArrowRight') wizardNext();
+            if (e.key === 'ArrowLeft') wizardPrev();
+        });
+
+        function setLanguage(lang) {
+            currentLang = lang;
+            applyTranslations();
+        }
+
+        function showPage(name) {
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('page-' + name).classList.add('active');
+            event.target.classList.add('active');
+            if (name === 'settings') loadConfig();
+        }
+
+        function toast(msg) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 3000);
+        }
+
+        function copyText(text) {
+            navigator.clipboard.writeText(text).then(() => toast(t('toast_copied'))).catch(() => {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                toast(t('toast_copied'));
+            });
+        }
+
+        const NETWORK_LABELS = {
+            mainnet: 'Mainnet',
+            testnet4: 'Testnet 4',
+            signet: 'Signet',
+        };
+
+        function populateNetworkSelect(selectId, selected, networks) {
+            const sel = document.getElementById(selectId);
+            if (!sel || sel.tagName !== 'SELECT') return;
+            const list = (networks && networks.length) ? networks : Object.keys(NETWORK_LABELS);
+            sel.innerHTML = list.map(n =>
+                `<option value="${n}">${NETWORK_LABELS[n] || n}</option>`
+            ).join('');
+            if (selected && list.includes(selected)) {
+                sel.value = selected;
+            }
+        }
+
+        let appUmbrelMode = false;
+
+        async function updateActiveNetwork() {
+            try {
+                const status = await (await fetch('/api/status')).json();
+                const net = status.network || 'testnet4';
+                const label = status.network_display || NETWORK_LABELS[net] || net;
+                const badge = document.getElementById('active-network');
+                if (badge) badge.textContent = label;
+                const importNet = document.getElementById('import-network');
+                if (importNet) importNet.value = net;
+            } catch (e) { console.error(e); }
+        }
+
+        function mempoolUrl(txid, network) {
+            const net = network || 'testnet4';
+            return `https://mempool.space/${net}/tx/${txid}`;
+        }
+
+        function makeCopyable(text, fullText) {
+            fullText = fullText || text;
+            return `<span class="copyable" onclick="copyText('${fullText}')" title="Click to copy">
+                <span class="text">${text}</span>
+                <span class="copy-icon">&#128203;</span>
+            </span>`;
+        }
+
+        function formatUnixTs(unix) {
+            if (!unix) return '-';
+            return new Date(unix * 1000).toLocaleString('es-ES', {
+                hour: '2-digit', minute: '2-digit', second: '2-digit',
+                day: '2-digit', month: '2-digit', year: 'numeric'
+            });
+        }
+
+        function formatRemaining(secs) {
+            if (secs == null || secs <= 0) return t('detail_locktime_ready') || 'ready';
+            const h = Math.floor(secs / 3600);
+            const m = Math.floor((secs % 3600) / 60);
+            const s = secs % 60;
+            if (h > 0) return `${h}h ${m}m`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
+
+        function displayStatus(tx) {
+            if (tx.locktime_deferred) {
+                return { cls: 'deferred-mtp', label: t('btn_deferred_mtp') };
+            }
+            if (tx.locktime_waiting && tx.locktime_satisfied === false) {
+                return { cls: 'waiting-locktime', label: t('btn_waiting_locktime') };
+            }
+            return { cls: tx.status, label: tx.status };
+        }
+
+        function shouldShowReschedule(tx) {
+            if (tx.status === 'broadcast' || tx.status === 'confirmed') return false;
+            if (tx.can_reschedule) return true;
+            if (tx.broadcast_mode === 'manual' && tx.status === 'pending') {
+                return !!(tx.scheduled_time || tx.schedule_trigger === 'price');
+            }
+            return (tx.status === 'pending' || tx.status === 'scheduled')
+                && (tx.scheduled_time || tx.schedule_trigger === 'price')
+                && tx.broadcast_mode !== 'by_block';
+        }
+
+        function shouldShowSchedule(tx) {
+            if (tx.status !== 'pending') return false;
+            if (tx.schedule_trigger === 'price') return false;
+            if (tx.broadcast_mode === 'manual') return !tx.scheduled_time;
+            return tx.broadcast_mode !== 'by_block' && !tx.scheduled_time;
+        }
+
+        function canUsePriceTrigger(tx) {
+            if (!tx || tx.status === 'broadcast' || tx.status === 'confirmed') return false;
+            if (tx.broadcast_mode !== 'manual') return false;
+            if (tx.nlocktime && tx.nlocktime > 0) return false;
+            return true;
+        }
+
+        function formatPriceTrigger(tx) {
+            if (tx.schedule_trigger !== 'price' || !tx.target_price) return '';
+            const cur = (tx.price_currency || 'usd').toUpperCase();
+            const cond = tx.price_condition === 'below' ? '\u2264' : '\u2265';
+            let s = `<span style="color: var(--green);">${t('sch_tab_price')}</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ${cond} ${tx.target_price.toLocaleString()} ${cur}</span>`;
+            if (tx.current_btc_price) {
+                s += `<br><span style="font-size: 10px; color: var(--text-dim);">${t('sch_price_now')}: ${tx.current_btc_price.toLocaleString()} ${cur}</span>`;
+            }
+            return s;
+        }
+
+        function updateDashboardMempoolCard(data) {
+            const card = document.getElementById('s-mempool-card');
+            const levelEl = document.getElementById('s-mempool-level');
+            const subEl = document.getElementById('s-mempool-sub');
+            if (!card || !levelEl || !subEl) return;
+
+            card.classList.remove('mempool-low', 'mempool-medium', 'mempool-high');
+
+            if (!data?.available) {
+                levelEl.textContent = '—';
+                levelEl.style.color = 'var(--text-dim)';
+                subEl.textContent = t('stat_mempool_unavailable');
+                return;
+            }
+
+            const level = data.congestion || 'low';
+            card.classList.add('mempool-' + level);
+            levelEl.style.color = '';
+            const labelKey = {
+                low: 'stat_mempool_cong_low',
+                medium: 'stat_mempool_cong_medium',
+                high: 'stat_mempool_cong_high'
+            }[level] || 'stat_mempool_cong_low';
+            levelEl.textContent = t(labelKey);
+
+            const parts = [];
+            if (data.fee_rate_sat_vb != null && !isNaN(data.fee_rate_sat_vb)) {
+                parts.push(data.fee_rate_sat_vb.toFixed(1) + ' sat/vB');
+            }
+            if (data.mempool_tx_count != null) {
+                parts.push(data.mempool_tx_count.toLocaleString() + ' tx');
+            }
+            subEl.textContent = parts.length ? parts.join(' · ') : t('stat_mempool_sub');
+        }
+
+        function updateDashboardPriceCard(data) {
+            const eurEl = document.getElementById('s-price-eur');
+            const usdEl = document.getElementById('s-price-usd');
+            const subEl = document.getElementById('s-price-sub');
+            if (!eurEl || !usdEl || !subEl) return;
+
+            const eur = data?.prices?.eur;
+            const usd = data?.prices?.usd;
+            eurEl.innerHTML = `<span class="fiat-tag">€</span>${eur != null ? eur.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}`;
+            usdEl.innerHTML = `<span class="fiat-tag">$</span>${usd != null ? usd.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}`;
+
+            if (data?.source) {
+                const staleNote = data.stale ? ` · ${t('stat_btc_price_stale')}` : '';
+                subEl.textContent = `${t('sch_price_source')}: ${data.source}${staleNote}`;
+                subEl.classList.toggle('stale', !!data.stale);
+            } else {
+                subEl.textContent = t('stat_btc_price_sub');
+                subEl.classList.remove('stale');
+            }
+        }
+
+        async function fetchBtcPrices() {
+            try {
+                const res = await fetch('/api/btc-price');
+                if (res.ok) {
+                    const data = await res.json();
+                    cachedBtcPrices = data.prices || {};
+                    cachedPriceSource = data.source || data.provider || '';
+                    cachedPriceStale = !!data.stale;
+                    updateDashboardPriceCard(data);
+                    return cachedBtcPrices;
+                }
+            } catch (e) { /* ignore */ }
+            return cachedBtcPrices;
+        }
+
+        function updateSchPriceDisplay() {
+            const cur = document.getElementById('sch-price-currency').value;
+            const liveEl = document.getElementById('sch-price-live');
+            const hintEl = document.getElementById('sch-price-current');
+            const price = cachedBtcPrices[cur];
+            if (price) {
+                liveEl.style.display = 'block';
+                const staleNote = cachedPriceStale ? ` (${t('sch_price_stale')})` : '';
+                const srcNote = cachedPriceSource ? ` — ${t('sch_price_source')}: ${cachedPriceSource}${staleNote}` : '';
+                liveEl.textContent = `${t('sch_price_live')}: ${price.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${cur.toUpperCase()}${srcNote}`;
+                hintEl.textContent = t('sch_price_hint');
+            } else {
+                liveEl.style.display = 'none';
+                hintEl.textContent = t('sch_price_hint');
+            }
+        }
+
+        function setSchTrigger(mode) {
+            document.getElementById('sch-trigger-type').value = mode;
+            document.getElementById('sch-datetime-panel').style.display = mode === 'datetime' ? 'block' : 'none';
+            document.getElementById('sch-price-panel').style.display = mode === 'price' ? 'block' : 'none';
+            document.getElementById('sch-tab-datetime').classList.toggle('sch-tab-active', mode === 'datetime');
+            document.getElementById('sch-tab-price').classList.toggle('sch-tab-active', mode === 'price');
+            if (mode === 'price') updateSchPriceDisplay();
+        }
+
+        function showMtpRemaining(tx) {
+            return tx.locktime_remaining_secs > 0 && tx.locktime_satisfied === false;
+        }
+
+        function defaultScheduleDatetime(tx) {
+            const now = new Date();
+            now.setMinutes(now.getMinutes() + 30);
+            if (tx && tx.locktime_target && tx.locktime_target > 500000000) {
+                const nlockDate = new Date(tx.locktime_target * 1000);
+                if (nlockDate > now) return nlockDate;
+            }
+            return now;
+        }
+
+        function toDatetimeLocalValue(date) {
+            const pad = n => String(n).padStart(2, '0');
+            return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+        }
+
+        function openScheduleModal(id, reschedule) {
+            const tx = allTxs.find(t => t.id === id);
+            document.getElementById('sch-tx-id').value = id;
+            document.getElementById('sch-tx-id').dataset.reschedule = reschedule ? '1' : '0';
+
+            const dt = defaultScheduleDatetime(tx);
+            document.getElementById('sch-datetime').value = toDatetimeLocalValue(dt);
+
+            const titleEl = document.getElementById('sch-title');
+            const confirmBtn = document.getElementById('sch-confirm-btn');
+            const banner = document.getElementById('sch-nlocktime-banner');
+            const showNlockWarning = reschedule || (tx && tx.locktime_target && tx.locktime_target > 500000000);
+
+            if (reschedule) {
+                titleEl.textContent = t('sch_reschedule_title');
+                confirmBtn.textContent = t('sch_reschedule_confirm');
+            } else {
+                titleEl.textContent = t('sch_title');
+                confirmBtn.textContent = t('sch_confirm');
+            }
+            banner.style.display = showNlockWarning ? 'block' : 'none';
+            if (showNlockWarning) banner.textContent = t('sch_nlocktime_warning');
+
+            const tabs = document.getElementById('sch-trigger-tabs');
+            const showPrice = canUsePriceTrigger(tx);
+            tabs.style.display = showPrice ? 'flex' : 'none';
+            setSchTrigger('datetime');
+            if (tx && tx.schedule_trigger === 'price') {
+                setSchTrigger('price');
+                if (tx.target_price) document.getElementById('sch-target-price').value = tx.target_price;
+                if (tx.price_currency) document.getElementById('sch-price-currency').value = tx.price_currency;
+                if (tx.price_condition) document.getElementById('sch-price-condition').value = tx.price_condition;
+            }
+
+            if (showPrice) fetchBtcPrices().then(() => updateSchPriceDisplay());
+
+            document.getElementById('schedule-overlay').classList.add('active');
+        }
+
+        async function refresh() {
+            try {
+                const [statsRes, txsRes, priceRes, mempoolRes] = await Promise.all([
+                    fetch('/api/stats'),
+                    fetch('/api/transactions'),
+                    fetch('/api/btc-price'),
+                    fetch('/api/mempool-status')
+                ]);
+                const stats = await statsRes.json();
+                allTxs = await txsRes.json();
+
+                if (priceRes.ok) {
+                    const priceData = await priceRes.json();
+                    cachedBtcPrices = priceData.prices || {};
+                    cachedPriceSource = priceData.source || priceData.provider || '';
+                    cachedPriceStale = !!priceData.stale;
+                    updateDashboardPriceCard(priceData);
+                }
+
+                if (mempoolRes.ok) {
+                    updateDashboardMempoolCard(await mempoolRes.json());
+                } else {
+                    updateDashboardMempoolCard({ available: false });
+                }
+
+                document.getElementById('s-pending').textContent = stats.pending;
+                document.getElementById('s-scheduled').textContent = stats.scheduled;
+                document.getElementById('s-broadcast').textContent = stats.broadcast;
+                document.getElementById('s-confirmed').textContent = stats.confirmed;
+                document.getElementById('s-total').textContent = stats.total_transactions;
+                document.getElementById('s-value').textContent = stats.total_value_btc.toFixed(8);
+
+                const tbody = document.getElementById('tx-list');
+                if (!allTxs.length) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="empty">${t('pool_empty')}</td></tr>`;
+                    return;
+                }
+                tbody.innerHTML = allTxs.map(tx => {
+                    const poolId = tx.id.substring(0, 8) + '...';
+                    const txidShort = tx.txid ? tx.txid.substring(0, 10) + '...' : '-';
+                    const txidLink = tx.txid
+                        ? `<a class="mempool-link" href="${mempoolUrl(tx.txid, tx.network)}" target="_blank" title="View on mempool.space">${txidShort} &#8599;</a>`
+                        : `<span style="color: var(--text-dim);">-</span>`;
+                    const typeLabel = tx.broadcast_mode || '-';
+                    const typeClass = tx.broadcast_mode ? `type-${tx.broadcast_mode}` : '';
+                    const schedLabel = t('detail_scheduled_label');
+                    const byBlockLabel = t('detail_by_block_label');
+                    const immediateLabel = t('detail_immediate_label');
+                    const statusInfo = displayStatus(tx);
+                    return `
+                    <tr>
+                        <td>${makeCopyable(poolId, tx.id)}</td>
+                        <td>${tx.txid ? makeCopyable(txidShort, tx.txid) + ' ' + txidLink : '<span style="color: var(--text-dim);">-</span>'}</td>
+                        <td><span class="status status-${statusInfo.cls}">${statusInfo.label}</span></td>
+                        <td><span class="status ${typeClass}">${typeLabel}</span></td>
+                        <td class="time">${formatPriceTrigger(tx)}${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + schedLabel + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}${(tx.broadcast_mode === 'scheduled' || tx.broadcast_mode === 'manual') && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}${tx.locktime_deferred && tx.original_scheduled_time ? '<br><span style="font-size: 10px; color: #FF8E8E;">' + t('detail_original_scheduled') + ': ' + new Date(tx.original_scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}) + '</span>' : ''}${showMtpRemaining(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">MTP: ' + formatRemaining(tx.locktime_remaining_secs) + '</span>' : ''}${tx.broadcast_mode === 'manual' && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}${tx.broadcast_mode === 'immediate' || (!tx.scheduled_time && tx.broadcast_mode !== 'by_block' && tx.broadcast_mode !== 'manual' && tx.schedule_trigger !== 'price') ? '<span style="color: var(--text-dim);">-</span>' : ''}</td>
+                        <td class="actions">
+                            <button class="btn btn-sm btn-outline" onclick="showDetail('${tx.id}')" title="${t('btn_view_details')}">&#128065;</button>
+                            ${shouldShowReschedule(tx) ? `<button class="btn btn-sm" onclick="reschedule('${tx.id}')">${t('btn_reschedule')}</button>` : ''}
+                            ${shouldShowSchedule(tx) ? `<button class="btn btn-sm btn-outline" onclick="schedule('${tx.id}')">${t('btn_schedule')}</button>` : ''}
+                            ${tx.locktime_waiting && !tx.locktime_deferred && !shouldShowReschedule(tx) ? '<span style="font-size: 11px; color: #B8A9FF; opacity: 0.9;">' + t('btn_waiting_locktime') + '</span>' : ''}
+                            ${tx.locktime_deferred ? '<span style="font-size: 11px; color: #FF8E8E; opacity: 0.9;">' + t('btn_deferred_mtp') + '</span>' : ''}
+                            ${tx.status === 'pending' && tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="font-size: 11px; color: var(--amber); opacity: 0.8;">' + t('btn_waiting_block') + '</span>' : ''}
+                            ${tx.status === 'failed' ? `<button class="btn btn-sm" onclick="retryTx('${tx.id}')">${t('btn_retry')}</button>` : ''}
+                            ${tx.status !== 'confirmed' ? `<button class="btn btn-sm btn-red" onclick="remove('${tx.id}')">${t('btn_remove')}</button>` : ''}
+                        </td>
+                    </tr>`;
+                }).join('');
+            } catch (e) { console.error(e); }
+        }
+
+        function showDetail(id) {
+            const tx = allTxs.find(t => t.id === id);
+            if (!tx) return;
+
+            const body = document.getElementById('modal-body');
+            const network = tx.network || 'testnet4';
+            const mempoolBase = network === 'mainnet' ? 'mempool.space' : `mempool.space/${network}`;
+
+            const statusInfo = displayStatus(tx);
+
+            body.innerHTML = `
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_pool_id')}</span>
+                    <span class="detail-value">${makeCopyable(tx.id.substring(0, 16) + '...', tx.id)}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_status')}</span>
+                    <span class="detail-value"><span class="status status-${statusInfo.cls}">${statusInfo.label}</span></span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_network')}</span>
+                    <span class="detail-value">${tx.network}</span>
+                </div>
+                ${tx.txid ? `
+                <div class="detail-row">
+                    <span class="detail-label">TXID</span>
+                    <span class="detail-value">
+                        ${makeCopyable(tx.txid.substring(0, 20) + '...', tx.txid)}
+                        <a class="mempool-link" href="https://${mempoolBase}/tx/${tx.txid}" target="_blank">${t('detail_view_mempool')} &#8599;</a>
+                    </span>
+                </div>` : ''}
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_scheduled')}</span>
+                    <span class="detail-value">
+                        ${tx.schedule_trigger === 'price' && tx.target_price ? '<span style="color: var(--green);">' + t('sch_tab_price') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + (tx.price_condition === 'below' ? '\u2264' : '\u2265') + ' ' + tx.target_price.toLocaleString() + ' ' + (tx.price_currency || 'usd').toUpperCase() + (tx.current_btc_price ? ' (' + t('sch_price_now') + ': ' + tx.current_btc_price.toLocaleString() + ')' : '') + '</span>' : ''}
+                        ${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + t('detail_scheduled_label') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}
+                        ${(tx.broadcast_mode === 'scheduled' || tx.broadcast_mode === 'manual') && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}
+                        ${tx.broadcast_mode === 'manual' && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}
+                        ${tx.broadcast_mode === 'immediate' ? '<span style="color: var(--text-dim);">' + t('detail_immediate_label') + '</span>' : ''}
+                    </span>
+                </div>
+                ${tx.locktime_deferred ? `
+                <div style="margin: 12px 0; padding: 14px; border-radius: 12px; background: #FF6B6B14; border: 1px solid #FF6B6B33;">
+                    <div style="color: #FF8E8E; font-weight: 600; margin-bottom: 10px;">${t('detail_deferred_title')}</div>
+                    ${tx.original_scheduled_time ? `
+                    <div class="detail-row" style="margin-bottom: 6px;">
+                        <span class="detail-label">${t('detail_original_scheduled')}</span>
+                        <span class="detail-value">${new Date(tx.original_scheduled_time).toLocaleString()}</span>
+                    </div>` : ''}
+                    ${tx.broadcast_missed_at ? `
+                    <div class="detail-row" style="margin-bottom: 6px;">
+                        <span class="detail-label">${t('detail_missed_at')}</span>
+                        <span class="detail-value">${new Date(tx.broadcast_missed_at).toLocaleString()}</span>
+                    </div>` : ''}
+                    ${tx.scheduled_time ? `
+                    <div class="detail-row" style="margin-bottom: 6px;">
+                        <span class="detail-label">${t('detail_next_attempt')}</span>
+                        <span class="detail-value">${new Date(tx.scheduled_time).toLocaleString()}</span>
+                    </div>` : ''}
+                    ${tx.chain_mtp ? `
+                    <div class="detail-row" style="margin-bottom: 6px;">
+                        <span class="detail-label">${t('detail_chain_mtp')}</span>
+                        <span class="detail-value">${formatUnixTs(tx.chain_mtp)}</span>
+                    </div>` : ''}
+                    ${tx.locktime_remaining_secs != null ? `
+                    <div class="detail-row">
+                        <span class="detail-label">${t('detail_locktime_remaining')}</span>
+                        <span class="detail-value" style="color: #FF8E8E;">${formatRemaining(tx.locktime_remaining_secs)}</span>
+                    </div>` : ''}
+                </div>` : ''}
+                ${tx.locktime_target ? `
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_nlocktime')}</span>
+                    <span class="detail-value">${formatUnixTs(tx.locktime_target)} <span style="color: var(--text-dim); font-size: 11px;">(${tx.locktime_target})</span></span>
+                </div>
+                ${tx.chain_mtp ? `
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_chain_mtp')}</span>
+                    <span class="detail-value">${formatUnixTs(tx.chain_mtp)} <span style="color: var(--text-dim); font-size: 11px;">(${tx.chain_mtp})</span></span>
+                </div>` : ''}
+                ${showMtpRemaining(tx) ? `
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_locktime_remaining')}</span>
+                    <span class="detail-value" style="color: #B8A9FF;">${formatRemaining(tx.locktime_remaining_secs)}</span>
+                </div>
+                <div class="setting-hint" style="margin: 0 0 12px 0; color: var(--text-dim);">${t('detail_locktime_hint')}</div>` : ''}
+                ` : ''}
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_fee_rate')}</span>
+                    <span class="detail-value">${tx.target_fee_rate ? tx.target_fee_rate.toFixed(2) + ' sat/vB' : '-'}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_utxos')}</span>
+                    <span class="detail-value">${tx.utxo_count}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_broadcast_at')}</span>
+                    <span class="detail-value">${tx.broadcast_at ? new Date(tx.broadcast_at).toLocaleString() : '-'}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_confirmed_at')}</span>
+                    <span class="detail-value">${tx.confirmed_at ? new Date(tx.confirmed_at).toLocaleString() : '-'}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_block_height')}</span>
+                    <span class="detail-value">${tx.block_height || '-'}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_created')}</span>
+                    <span class="detail-value">${new Date(tx.created_at).toLocaleString()}</span>
+                </div>
+                ${tx.error_message ? `
+                <div class="detail-row">
+                    <span class="detail-label">${t('detail_error')}</span>
+                    <span class="detail-value" style="color: var(--red); font-size: 12px;">${tx.error_message}</span>
+                </div>` : ''}
+                ${tx.tx_hex ? `
+                <div class="detail-row" style="flex-direction: column; align-items: flex-start;">
+                    <span class="detail-label" style="margin-bottom: 8px;">${t('detail_raw_hex')}</span>
+                    <div class="detail-value hex" style="width: 100%; cursor: pointer;" onclick="copyText('${tx.tx_hex}')" title="Click to copy full hex">
+                        ${tx.tx_hex}
+                    </div>
+                </div>` : ''}
+            `;
+
+            document.getElementById('modal-actions').innerHTML = `
+                ${shouldShowReschedule(tx) ? `<button class="btn" onclick="reschedule('${tx.id}')">${t('btn_reschedule')}</button>` : ''}
+                ${shouldShowSchedule(tx) ? `<button class="btn btn-outline" onclick="schedule('${tx.id}')">${t('btn_schedule')}</button>` : ''}
+                ${tx.status === 'failed' ? `<button class="btn" onclick="retryTx('${tx.id}')">${t('btn_retry')}</button>` : ''}
+                ${tx.txid ? `<a class="btn btn-outline" href="https://${mempoolBase}/tx/${tx.txid}" target="_blank">${t('detail_view_mempool')}</a>` : ''}
+                <button class="btn btn-outline" onclick="copyText('${tx.id}')">${t('detail_copy_poolid')}</button>
+                ${tx.txid ? `<button class="btn btn-outline" onclick="copyText('${tx.txid}')">${t('detail_copy_txid')}</button>` : ''}
+                ${tx.tx_hex ? `<button class="btn btn-outline" onclick="copyText('${tx.tx_hex}')">${t('detail_copy_hex')}</button>` : ''}
+            `;
+
+            document.getElementById('modal-overlay').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('modal-overlay').classList.remove('active');
+        }
+
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+        async function importTx() {
+            const hex = document.getElementById('import-hex').value.trim();
+            const label = document.getElementById('import-label').value.trim();
+            const network = document.getElementById('import-network').value;
+            if (!hex) return toast(t('toast_enter_hex'));
+
+            try {
+                const res = await fetch('/api/transactions/import', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        tx_hex: hex, 
+                        label: label || null,
+                        network: network,
+                    })
+                });
+                if (res.ok) {
+                    const tx = await res.json();
+                    document.getElementById('import-hex').value = '';
+                    document.getElementById('import-label').value = '';
+                    toast(t('toast_imported'));
+                    refresh();
+                } else { toast(t('toast_import_fail')); }
+            } catch (e) { toast('Error: ' + e.message); }
+        }
+
+        async function estimateFeeInBackground(txId, hex) {
+            try {
+                const feeRes = await fetch('/api/estimate-fee', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({tx_hex: hex})
+                });
+                if (feeRes.ok) {
+                    const feeData = await feeRes.json();
+                    if (feeData.fee_rate > 0) {
+                        // Update the transaction with the detected fee (set both min and max to fix it)
+                        await fetch(`/api/transactions/${txId}/schedule`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({min_fee_rate: feeData.fee_rate, max_fee_rate: feeData.fee_rate})
+                        });
+                        toast(`Fee detected: ${feeData.fee_rate.toFixed(2)} sat/vB (${feeData.vsize} vB)`);
+                        refresh();
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        }
+
+        function schedule(id) {
+            openScheduleModal(id, false);
+        }
+
+        function reschedule(id) {
+            openScheduleModal(id, true);
+        }
+
+        function setScheduleNow() {
+            const now = new Date();
+            now.setMinutes(now.getMinutes() + 30);
+            document.getElementById('sch-datetime').value = now.toISOString().slice(0, 16);
+        }
+
+        function setScheduleTomorrow() {
+            const d = new Date();
+            d.setDate(d.getDate() + 1);
+            d.setHours(14, 0, 0, 0);
+            document.getElementById('sch-datetime').value = d.toISOString().slice(0, 16);
+        }
+
+        function setScheduleNextWeek() {
+            const d = new Date();
+            d.setDate(d.getDate() + 7);
+            d.setHours(10, 0, 0, 0);
+            document.getElementById('sch-datetime').value = d.toISOString().slice(0, 16);
+        }
+
+        function closeScheduleModal() {
+            document.getElementById('schedule-overlay').classList.remove('active');
+        }
+
+        async function confirmSchedule() {
+            const id = document.getElementById('sch-tx-id').value;
+            const isReschedule = document.getElementById('sch-tx-id').dataset.reschedule === '1';
+            const trigger = document.getElementById('sch-trigger-type').value;
+            const tx = allTxs.find(t => t.id === id);
+            const fee = tx && tx.target_fee_rate ? tx.target_fee_rate : 5.0;
+
+            if (trigger === 'price') {
+                const target = parseFloat(document.getElementById('sch-target-price').value);
+                if (!target || target <= 0) return toast(t('sch_price_invalid'));
+                const body = {
+                    target_price: target,
+                    price_currency: document.getElementById('sch-price-currency').value,
+                    price_condition: document.getElementById('sch-price-condition').value,
+                    fixed_fee_rate: fee
+                };
+                try {
+                    const res = await fetch(`/api/transactions/${id}/schedule`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body)
+                    });
+                    if (res.ok) {
+                        closeScheduleModal();
+                        toast(isReschedule ? t('toast_rescheduled') : t('toast_scheduled'));
+                        refresh();
+                    } else {
+                        toast('Error: ' + await res.text());
+                    }
+                } catch (e) { toast('Error'); }
+                return;
+            }
+
+            const dt = document.getElementById('sch-datetime').value;
+            
+            if (!dt) return toast(t('toast_select_date'));
+            const chosen = new Date(dt);
+            const now = new Date();
+            if (chosen <= now) return toast(t('toast_select_date'));
+
+            if (tx && tx.locktime_target && tx.locktime_target > 500000000) {
+                const chosenUnix = Math.floor(chosen.getTime() / 1000);
+                if (chosenUnix < tx.locktime_target) {
+                    return toast(t('sch_nlocktime_warning'));
+                }
+            }
+
+            const isoTime = chosen.toISOString();
+            const body = {
+                scheduled_time: isoTime,
+                fixed_fee_rate: tx && tx.target_fee_rate ? tx.target_fee_rate : 5.0
+            };
+
+            try {
+                const res = await fetch(`/api/transactions/${id}/schedule`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body)
+                });
+                if (res.ok) {
+                    closeScheduleModal();
+                    toast(isReschedule ? t('toast_rescheduled') : t('toast_scheduled'));
+                    refresh();
+                } else {
+                    const err = await res.text();
+                    toast('Error: ' + err);
+                }
+            } catch (e) { toast('Error'); }
+        }
+
+        async function scheduleAll() {
+            try {
+                const txs = await (await fetch('/api/transactions')).json();
+                const pending = txs.filter(t => t.status === 'pending');
+                for (const tx of pending) {
+                    await fetch(`/api/transactions/${tx.id}/schedule`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({})
+                    });
+                }
+                toast(`${pending.length} transactions scheduled`);
+                refresh();
+            } catch (e) { toast('Error'); }
+        }
+
+        async function retryTx(id) {
+            try {
+                const res = await fetch(`/api/transactions/${id}/retry`, {method: 'POST'});
+                if (!res.ok) {
+                    const err = await res.text();
+                    toast(err || 'Error');
+                    return;
+                }
+                toast(t('toast_retried'));
+                closeModal();
+                refresh();
+            } catch (e) { toast('Error'); }
+        }
+
+        async function remove(id) {
+            if (!confirm('Remove this transaction from pool?')) return;
+            try {
+                const res = await fetch(`/api/transactions/${id}/remove`, {method: 'POST'});
+                if (!res.ok) {
+                    const err = await res.text();
+                    toast(err || 'Error');
+                    return;
+                }
+                toast(t('toast_removed'));
+                refresh();
+            } catch (e) { toast('Error'); }
+        }
+
+        function toggleScheduledFields() {
+            const mode = document.getElementById('cfg-broadcast-mode').value;
+            const scheduledGroup = document.getElementById('cfg-scheduled-datetime-group');
+            const delayGroup = document.getElementById('cfg-delay-group');
+            if (mode === 'immediate') {
+                scheduledGroup.style.display = 'none';
+                delayGroup.style.display = 'none';
+            } else if (mode === 'by_block') {
+                scheduledGroup.style.display = 'none';
+                delayGroup.style.display = 'none';
+            } else if (mode === 'scheduled') {
+                scheduledGroup.style.display = 'none';
+                delayGroup.style.display = 'none';
+            } else {
+                scheduledGroup.style.display = 'none';
+                delayGroup.style.display = 'none';
+            }
+        }
+
+        function copyWalletUrl(elementId) {
+            const el = document.getElementById(elementId);
+            if (!el || !el.textContent || el.textContent === '-') return;
+            navigator.clipboard.writeText(el.textContent).then(() => toast(t('toast_copied')));
+        }
+
+        function updateWalletUrls(cfg) {
+            const walletUrl = cfg.wallet_connect_url || cfg.sparrow_connect_url;
+            const walletEl = document.getElementById('wallet-url');
+            if (walletEl && walletUrl) walletEl.textContent = walletUrl;
+
+            appUmbrelMode = !!cfg.umbrel_mode;
+            const externalGroup = document.getElementById('cfg-external-indexer-group');
+            if (externalGroup) {
+                externalGroup.style.display = appUmbrelMode ? 'none' : '';
+            }
+            const discoverBtn = document.getElementById('btn-discover-indexer');
+            if (discoverBtn) {
+                discoverBtn.style.display = appUmbrelMode ? 'none' : '';
+            }
+            const fallbackHint = document.getElementById('indexer-fallback-hint');
+            if (fallbackHint) {
+                fallbackHint.style.display = appUmbrelMode ? 'block' : 'none';
+            }
+
+            const statusHint = document.getElementById('indexer-status-hint');
+            if (statusHint) {
+                statusHint.textContent = appUmbrelMode ? t('cfg_indexer_status_hint') : t('cfg_indexer_status_hint_dev');
+            }
+
+            const autoHint = document.getElementById('indexer-auto-hint');
+            const nodeUrl = cfg.indexer_node_url || '';
+            if (autoHint && nodeUrl) {
+                const prefix = appUmbrelMode ? t('cfg_indexer_node') : t('cfg_indexer_auto');
+                autoHint.textContent = `${prefix}: ${nodeUrl}`;
+                autoHint.style.display = 'block';
+                autoHint.style.color = 'var(--green)';
+            } else if (autoHint) {
+                autoHint.style.display = 'none';
+            }
+        }
+
+        function applyIndexerConfig(cfg) {
+            document.getElementById('cfg-electrs').value = cfg.indexer_url || '';
+            const sslBox = document.getElementById('cfg-indexer-ssl');
+            if (sslBox) sslBox.checked = !!cfg.indexer_use_ssl;
+        }
+
+        function indexerSslChecked() {
+            const box = document.getElementById('cfg-indexer-ssl');
+            return box ? box.checked : false;
+        }
+
+        async function loadConfig() {
+            try {
+                const cfg = await (await fetch('/api/config')).json();
+                applyIndexerConfig(cfg);
+                document.getElementById('cfg-broadcast-mode').value = cfg.broadcast_mode || 'immediate';
+                document.getElementById('cfg-default-delay').value = cfg.default_delay_hours || 24;
+                if (cfg.scheduled_datetime) {
+                    document.getElementById('cfg-scheduled-datetime').value = cfg.scheduled_datetime;
+                } else {
+                    document.getElementById('cfg-scheduled-datetime').value = '';
+                }
+                document.getElementById('cfg-min-delay').value = cfg.min_delay_hours;
+                document.getElementById('cfg-max-delay').value = cfg.max_delay_hours;
+                toggleScheduledFields();
+                updateWalletUrls(cfg);
+            } catch (e) { console.error(e); }
+        }
+
+        async function checkIndexerStatus() {
+            try {
+                const statusRes = await fetch('/api/status');
+                if (statusRes.ok) {
+                    const status = await statusRes.json();
+                    const dot = document.getElementById('indexer-status-dot');
+                    const text = document.getElementById('indexer-status-text');
+                    const height = document.getElementById('indexer-height');
+
+                    if (status.electrum_connected) {
+                        dot.style.background = 'var(--green)';
+                        dot.style.boxShadow = '0 0 8px var(--green)';
+                        text.textContent = t('cfg_connected');
+                        text.style.color = 'var(--green)';
+                        const hint = document.getElementById('indexer-status-hint');
+                        if (hint) {
+                            hint.textContent = appUmbrelMode ? t('cfg_indexer_status_hint') : t('cfg_indexer_status_hint_dev');
+                            hint.style.color = 'var(--text-dim)';
+                        }
+                        if (status.indexer_height) {
+                            let heightText = `Block height: ${status.indexer_height}`;
+                            if (status.chain_mtp) {
+                                heightText += ` | MTP: ${formatUnixTs(status.chain_mtp)}`;
+                            }
+                            height.textContent = heightText;
+                            const bh = document.getElementById('s-blockheight');
+                            const bhSub = document.getElementById('s-blockheight-sub');
+                            if (bh) bh.textContent = status.indexer_height;
+                            if (bhSub) {
+                                bhSub.textContent = status.chain_mtp
+                                    ? `MTP ${formatUnixTs(status.chain_mtp)}`
+                                    : new Date().toLocaleTimeString();
+                            }
+                        }
+                    } else {
+                        dot.style.background = 'var(--red)';
+                        text.textContent = t('cfg_disconnected');
+                        text.style.color = 'var(--red)';
+                        const hint = document.getElementById('indexer-status-hint');
+                        if (hint && status.indexer_status_hint) {
+                            hint.textContent = status.indexer_status_hint;
+                            hint.style.color = 'var(--amber)';
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function testIndexer() {
+            const url = document.getElementById('cfg-electrs').value.trim();
+            if (!url) {
+                showIndexerStatus('Enter a URL first', 'var(--red)');
+                return;
+            }
+            const btn = document.getElementById('btn-test-indexer');
+            const resultEl = document.getElementById('indexer-test-result');
+            btn.disabled = true;
+            btn.textContent = 'Testing...';
+            resultEl.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/test-indexer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, indexer_use_ssl: indexerSslChecked() })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    if (data.url) {
+                        document.getElementById('cfg-electrs').value = data.url;
+                    }
+                    if (data.use_ssl !== undefined) {
+                        const sslBox = document.getElementById('cfg-indexer-ssl');
+                        if (sslBox) sslBox.checked = !!data.use_ssl;
+                    }
+                    if (data.height) {
+                        showIndexerStatus(`Connected! Height: ${data.height}`, 'var(--green)');
+                    } else {
+                        showIndexerStatus(`Connected but height unavailable`, 'var(--amber)');
+                    }
+                } else {
+                    showIndexerStatus(`Error: ${data.error || 'Connection failed'}`, 'var(--red)');
+                }
+            } catch (e) {
+                showIndexerStatus(`Error: ${e.message}`, 'var(--red)');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Test';
+            }
+        }
+
+        function showIndexerStatus(msg, color) {
+            const el = document.getElementById('indexer-test-result');
+            el.textContent = msg;
+            el.style.color = color;
+            el.style.display = 'block';
+        }
+
+        async function discoverIndexer() {
+            const btn = document.getElementById('btn-discover-indexer');
+            btn.disabled = true;
+            btn.textContent = 'Scanning...';
+            try {
+                const res = await fetch('/api/discover-indexer', { method: 'POST' });
+                const data = await res.json();
+                if (data.indexer_url) {
+                    document.getElementById('cfg-electrs').value = data.indexer_url;
+                }
+                const color = data.success ? 'var(--green)' : 'var(--red)';
+                showIndexerStatus(data.message, color);
+                if (data.success) {
+                    await checkIndexerStatus();
+                    await loadConfig();
+                }
+            } catch (e) {
+                showIndexerStatus(`Error: ${e.message}`, 'var(--red)');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = t('cfg_indexer_discover');
+            }
+        }
+
+        async function saveConfig() {
+            try {
+                const body = {
+                    indexer_url: appUmbrelMode ? '' : document.getElementById('cfg-electrs').value,
+                    indexer_use_ssl: indexerSslChecked(),
+                    broadcast_mode: document.getElementById('cfg-broadcast-mode').value,
+                    default_delay_hours: parseInt(document.getElementById('cfg-default-delay').value) || 24,
+                    scheduled_datetime: document.getElementById('cfg-scheduled-datetime').value || null,
+                    min_delay_hours: parseInt(document.getElementById('cfg-min-delay').value),
+                    max_delay_hours: parseInt(document.getElementById('cfg-max-delay').value),
+                };
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body)
+                });
+                if (res.ok) {
+                    toast(t('toast_saved'));
+                    const cfg = await res.json();
+                    applyIndexerConfig(cfg);
+                    updateWalletUrls(cfg);
+                    await checkIndexerStatus();
+                    if (cfg.network_changed && cfg.network_editable) {
+                        showNetworkRestartModal();
+                    }
+                } else {
+                    const err = await res.text();
+                    toast('Error saving: ' + err);
+                }
+            } catch (e) { toast('Error saving'); }
+        }
+
+        function showRestartModal() {
+            const overlay = document.getElementById('restart-overlay');
+            const countdownEl = document.getElementById('restart-countdown');
+            overlay.classList.add('active');
+            let seconds = 10;
+            countdownEl.textContent = seconds;
+            const interval = setInterval(() => {
+                seconds--;
+                countdownEl.textContent = seconds;
+                if (seconds <= 0) {
+                    clearInterval(interval);
+                }
+            }, 1000);
+            pollForRestart(10, interval);
+        }
+
+        async function pollForRestart(maxSeconds, interval) {
+            for (let i = 0; i < maxSeconds; i++) {
+                await new Promise(r => setTimeout(r, 1000));
+                try {
+                    await fetch('/api/status');
+                    clearInterval(interval);
+                    document.getElementById('restart-overlay').classList.remove('active');
+                    location.reload(true);
+                    return;
+                } catch {}
+            }
+            clearInterval(interval);
+            document.getElementById('restart-overlay').classList.remove('active');
+        }
+
+        function showNetworkRestartModal() {
+            const overlay = document.getElementById('network-restart-overlay');
+            if (overlay) {
+                overlay.classList.add('active');
+            } else {
+                toast('Network changed. Please restart broadcast-pool manually.');
+            }
+        }
+
+        function closeNetworkRestartModal() {
+            const overlay = document.getElementById('network-restart-overlay');
+            if (overlay) {
+                overlay.classList.remove('active');
+            }
+        }
+
+        refresh();
+        loadConfig();
+        checkIndexerStatus();
+        updateActiveNetwork();
+        setInterval(refresh, 5000);
+        setInterval(checkIndexerStatus, 10000);
+        applyTranslations();
+        showWizardIfNeeded();
+    </script>
+</body>
+</html>

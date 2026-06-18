@@ -1,0 +1,25 @@
+[network]
+type = "testnet4"
+
+# Indexing and broadcast use Electrs/Fulcrum (configure in Settings or APP_ELECTRS_* env).
+# Bitcoin Core RPC is optional (network detection / mempool stats); Umbrel injects it via env.
+
+[pool]
+max_size_kb = 300
+rebroadcast_interval_minutes = 30
+expiry_days = 14
+
+[schedule]
+min_delay_hours = 2
+max_delay_hours = 72
+min_fee_rate = 1.0
+max_fee_rate = 50.0
+
+[privacy]
+use_tor = false
+tor_socks_port = 9050
+rotate_identity_per_tx = true
+
+[web]
+host = "127.0.0.1"
+port = 8080
