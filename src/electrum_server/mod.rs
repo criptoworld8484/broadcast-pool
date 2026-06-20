@@ -202,12 +202,60 @@ struct JsonRpcRequest {
     id: serde_json::Value,
 }
 
-/// Parse `blockchain.transaction.broadcast` even when strict struct decode would fail.
-/// Supports single requests, batch arrays, and params as `[hex]` or `"hex"`.
+const BROADCAST_METHODS: &[&str] = &[
+    "blockchain.transaction.broadcast",
+    "blockchain.transaction.broadcast_package",
+];
+
+fn is_broadcast_method(method: &str) -> bool {
+    BROADCAST_METHODS.contains(&method)
+}
+
+fn line_mentions_tx_rpc(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("broadcast") || lower.contains("transaction")
+}
+
+fn log_incoming_client_line(peer_addr: std::net::SocketAddr, line_str: &str, source_label: &str) {
+    if line_mentions_tx_rpc(line_str) {
+        tracing::info!(
+            "Electrum incoming [{}] from {} (len={}, preview={})",
+            source_label,
+            peer_addr,
+            line_str.len(),
+            &line_str[..line_str.len().min(200)]
+        );
+    }
+}
+
+fn peek_line_methods(line: &str) -> Option<Vec<String>> {
+    let v = serde_json::from_str::<serde_json::Value>(line.trim()).ok()?;
+    if let Some(arr) = v.as_array() {
+        return Some(
+            arr.iter()
+                .filter_map(|item| item.get("method")?.as_str().map(str::to_string))
+                .collect(),
+        );
+    }
+    v.get("method")
+        .and_then(|m| m.as_str())
+        .map(|m| vec![m.to_string()])
+}
+
+/// Parse broadcast RPC even when strict struct decode would fail.
+/// Supports `[hex]`, `"hex"`, object params, and broadcast_package batches.
 fn params_first_string(params: &serde_json::Value) -> Option<String> {
     match params {
         serde_json::Value::Array(arr) => arr.first()?.as_str().map(|s| s.to_string()),
         serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(map) => {
+            for key in ["raw_tx", "tx", "transaction", "hex"] {
+                if let Some(serde_json::Value::String(s)) = map.get(key) {
+                    return Some(s.clone());
+                }
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -217,11 +265,18 @@ fn json_rpc_id(v: &serde_json::Value) -> serde_json::Value {
 }
 
 fn extract_broadcast_from_value(v: &serde_json::Value) -> Option<(serde_json::Value, String)> {
-    if v.get("method")?.as_str()? != "blockchain.transaction.broadcast" {
+    let method = v.get("method")?.as_str()?;
+    if !is_broadcast_method(method) {
         return None;
     }
     let id = json_rpc_id(v);
-    let hex = params_first_string(v.get("params")?)?;
+    let params = v.get("params")?;
+    if method == "blockchain.transaction.broadcast_package" {
+        let tx_arr = params.as_array()?.first()?.as_array()?;
+        let hex = tx_arr.first()?.as_str()?;
+        return Some((id, hex.to_string()));
+    }
+    let hex = params_first_string(params)?;
     Some((id, hex))
 }
 
@@ -239,7 +294,7 @@ fn extract_broadcast_hex(line: &str) -> Option<(serde_json::Value, String)> {
 }
 
 fn line_looks_like_broadcast(line: &str) -> bool {
-    line.contains("blockchain.transaction.broadcast")
+    BROADCAST_METHODS.iter().any(|m| line.contains(m))
 }
 
 fn line_json_rpc_id(line: &str) -> serde_json::Value {
@@ -248,7 +303,10 @@ fn line_json_rpc_id(line: &str) -> serde_json::Value {
     };
     if let Some(arr) = v.as_array() {
         for item in arr {
-            if item.get("method").and_then(|m| m.as_str()) == Some("blockchain.transaction.broadcast")
+            if item
+                .get("method")
+                .and_then(|m| m.as_str())
+                .is_some_and(is_broadcast_method)
             {
                 return json_rpc_id(item);
             }
@@ -279,8 +337,11 @@ struct JsonRpcErrorResponse {
 
 struct BroadcastHandleResult {
     txid: String,
+    tx_hex: String,
     retained: bool,
     affected_scripthashes: Vec<String>,
+    /// Input scripthash enrichment deferred until after Sparrow ack (electrs can be slow on Umbrel).
+    defer_input_enrichment: bool,
 }
 
 struct SessionState {
@@ -289,6 +350,9 @@ struct SessionState {
     /// While handling a client JSON-RPC line, defer upstream notifications to avoid interleaving.
     client_busy: bool,
     deferred_indexer_out: Vec<Vec<u8>>,
+    /// Sparrow diagnostics: did this session ever send a broadcast RPC?
+    broadcast_intercepted: bool,
+    rpc_lines_handled: u32,
 }
 
 impl SessionState {
@@ -298,6 +362,32 @@ impl SessionState {
             pending_methods: HashMap::new(),
             client_busy: false,
             deferred_indexer_out: Vec::new(),
+            broadcast_intercepted: false,
+            rpc_lines_handled: 0,
+        }
+    }
+
+    fn log_disconnect_summary(&self, peer_addr: std::net::SocketAddr, source_label: &str) {
+        if source_label != "sparrow" {
+            return;
+        }
+        if self.broadcast_intercepted {
+            tracing::info!(
+                "Sparrow session ended {} (handled {} RPC lines, broadcast received)",
+                peer_addr,
+                self.rpc_lines_handled
+            );
+            return;
+        }
+        if self.rpc_lines_handled > 3 {
+            tracing::error!(
+                "Sparrow session ended {} without any broadcast RPC ({} lines handled). \
+                 If txs stay on 'Broadcasting' or never appear in the pool: disable Tor/proxy in \
+                 Sparrow Settings→Network — Sparrow sends broadcasts to mempool.space over Tor \
+                 instead of this Electrum server when proxy/Tor is active.",
+                peer_addr,
+                self.rpc_lines_handled
+            );
         }
     }
 
@@ -346,6 +436,15 @@ impl SessionState {
             _ => {}
         }
     }
+}
+
+fn scripthash_from_params(params: &Option<serde_json::Value>) -> Option<String> {
+    params
+        .as_ref()
+        .and_then(|p| p.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn fetch_scripthash_history_sync(scripthash: &str, indexer_url: &str) -> Vec<serde_json::Value> {
@@ -483,7 +582,10 @@ fn local_electrum_response(
         })),
         "server.banner" => Some(serde_json::json!({
             "jsonrpc": "2.0",
-            "result": format!("broadcast-pool {} — Bitcoin transaction pool for Sparrow", env!("CARGO_PKG_VERSION")),
+            "result": format!(
+                "broadcast-pool {} - disable Sparrow Tor proxy so broadcasts reach this pool",
+                env!("CARGO_PKG_VERSION")
+            ),
             "id": id
         })),
         "server.ping" => Some(serde_json::json!({
@@ -504,7 +606,10 @@ fn local_electrum_response(
                     "protocol_max": "1.4",
                     "protocol_min": "1.0",
                     "protocol_version": "1.4",
-                    "hash_function": "sha256"
+                    "server_version": format!("broadcast-pool {}", env!("CARGO_PKG_VERSION")),
+                    "hash_function": "sha256",
+                    "broadcast_pool": true,
+                    "sparrow_tor_warning": "Disable Sparrow Settings→Network proxy/Tor or broadcasts bypass this pool"
                 },
                 "id": id
             }))
@@ -522,6 +627,42 @@ const LOCAL_ELECTRUM_METHODS: &[&str] = &[
 
 fn is_local_handshake_method(method: &str) -> bool {
     LOCAL_ELECTRUM_METHODS.contains(&method)
+}
+
+fn local_fast_response(request: &JsonRpcRequest) -> Option<serde_json::Value> {
+    let id = request.id.clone();
+    match request.method.as_str() {
+        // Sparrow polls these via electrum before/during broadcast; never block on upstream.
+        "blockchain.estimatefee" => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": 0.00001,
+            "id": id
+        })),
+        "blockchain.relayfee" => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": 0.00001,
+            "id": id
+        })),
+        "mempool.get_fee_histogram" => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": [],
+            "id": id
+        })),
+        "blockchain.block.stats" => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {
+                "height": request.params.as_ref()
+                    .and_then(|p| p.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                "time": 0,
+                "median_fee": 0.00001
+            },
+            "id": id
+        })),
+        _ => None,
+    }
 }
 
 fn batch_contains_local_handshake(subrequests: &[JsonRpcRequest]) -> bool {
@@ -545,19 +686,97 @@ fn line_is_batch(line: &str) -> bool {
     line.trim_start().starts_with('[')
 }
 
+/// Prefer live pool indexer URL (healed after Umbrel startup) over session snapshot.
+fn resolve_live_indexer_url(pool_manager: &PoolManager, config: &Arc<Mutex<Config>>) -> String {
+    if let Some(url) = pool_manager.get_indexer_url() {
+        if !url.is_empty() {
+            return url;
+        }
+    }
+    config
+        .lock()
+        .ok()
+        .and_then(|c| c.indexer.as_ref().map(|i| i.url.clone()))
+        .unwrap_or_default()
+}
+
+/// Process broadcast lines before other buffered RPCs so subscribe storms do not delay sends.
+fn pop_client_line(client_buf: &mut Vec<u8>) -> Option<(Vec<u8>, String)> {
+    let mut line_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0usize;
+    for (i, &b) in client_buf.iter().enumerate() {
+        if b == b'\n' {
+            line_ranges.push((start, i));
+            start = i + 1;
+        }
+    }
+    if line_ranges.is_empty() {
+        return None;
+    }
+    let pick = line_ranges
+        .iter()
+        .position(|&(s, e)| {
+            let line_str = String::from_utf8_lossy(&client_buf[s..e]);
+            extract_broadcast_hex(&line_str).is_some() || line_looks_like_broadcast(&line_str)
+        })
+        .unwrap_or(0);
+    let (s, e) = line_ranges[pick];
+    let line_bytes = client_buf[s..e].to_vec();
+    client_buf.drain(..=e);
+    let line_str = String::from_utf8_lossy(&line_bytes)
+        .trim_end_matches('\r')
+        .to_string();
+    Some((line_bytes, line_str))
+}
+
 async fn forward_subrequest_sync(
     request: &JsonRpcRequest,
     indexer_url: &str,
     session: &mut SessionState,
     pool_manager: &PoolManager,
 ) -> Result<serde_json::Value> {
+    forward_subrequest_sync_timed(
+        request,
+        indexer_url,
+        session,
+        pool_manager,
+        std::time::Duration::from_secs(2),
+    )
+    .await
+}
+
+async fn forward_subrequest_sync_timed(
+    request: &JsonRpcRequest,
+    indexer_url: &str,
+    session: &mut SessionState,
+    pool_manager: &PoolManager,
+    timeout: std::time::Duration,
+) -> Result<serde_json::Value> {
+    if is_broadcast_method(&request.method) {
+        anyhow::bail!("broadcast must not be forwarded to upstream electrs");
+    }
+
     session.track_request(request);
     let raw = serde_json::to_string(request)?;
     let url = indexer_url.to_string();
     let id = request.id.clone();
-    let response_str = tokio::task::spawn_blocking(move || forward_to_indexer_sync(&raw, &url))
-        .await
-        .context("sync forward task failed")?;
+    let response_str = match tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || forward_to_indexer_sync(&raw, &url)),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(_) => {
+            tracing::warn!("Indexer forward timed out for {}", request.method);
+            return Ok(serde_json::json!({
+                "jsonrpc": "2.0",
+                "error": { "code": -32000, "message": "Indexer temporarily unavailable" },
+                "id": id
+            }));
+        }
+    };
     let Some(resp_str) = response_str else {
         return Ok(serde_json::json!({
             "jsonrpc": "2.0",
@@ -570,6 +789,115 @@ async fn forward_subrequest_sync(
         modify_upstream_response(&mut msg, &method, &scripthash, pool_manager, indexer_url);
     }
     Ok(msg)
+}
+
+fn parse_headers_subscribe_result(msg: &serde_json::Value) -> Option<(u64, String)> {
+    let result = msg.get("result")?;
+    let height = result.get("height")?.as_u64()?;
+    let hex = result.get("hex")?.as_str()?;
+    if height == 0 || hex.is_empty() {
+        return None;
+    }
+    Some((height, hex.to_string()))
+}
+
+pub fn warm_chain_tip_cache(indexer_url: &str, pool_manager: &PoolManager) {
+    if indexer_url.is_empty() {
+        return;
+    }
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "blockchain.headers.subscribe",
+        "params": [],
+        "id": 0
+    });
+    let raw = req.to_string();
+    let url = indexer_url.to_string();
+    if let Some(resp_str) = forward_to_indexer_sync(&raw, &url) {
+        if let Ok(msg) = serde_json::from_str::<serde_json::Value>(resp_str.trim()) {
+            if let Some((height, hex)) = parse_headers_subscribe_result(&msg) {
+                pool_manager.cache_chain_tip(height, hex);
+                tracing::info!("Warmed chain tip cache from electrs (height={})", height);
+                return;
+            }
+        }
+    }
+    tracing::debug!("Could not warm chain tip cache from electrs");
+}
+
+async fn handle_headers_subscribe(
+    request: &JsonRpcRequest,
+    pool_manager: &Arc<PoolManager>,
+    indexer_url: &str,
+) -> Result<serde_json::Value> {
+    let id = request.id.clone();
+    if !indexer_url.is_empty() {
+        let raw = serde_json::to_string(request)?;
+        let url = indexer_url.to_string();
+        let pm = pool_manager.clone();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || forward_to_indexer_sync(&raw, &url)),
+        )
+        .await
+        {
+            Ok(Ok(Some(resp_str))) => {
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(resp_str.trim()) {
+                    if let Some((height, hex)) = parse_headers_subscribe_result(&msg) {
+                        pm.cache_chain_tip(height, hex);
+                        tracing::debug!("headers.subscribe from electrs height={}", height);
+                        return Ok(msg);
+                    }
+                    if msg.get("error").is_some() {
+                        tracing::warn!(
+                            "headers.subscribe electrs error: {:?}",
+                            msg.get("error")
+                        );
+                    }
+                }
+            }
+            Ok(Ok(None)) => {
+                tracing::warn!("headers.subscribe: electrs connect failed");
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("headers.subscribe task failed: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!("headers.subscribe: electrs timed out (5s)");
+            }
+        }
+    }
+
+    if let Some((height, hex)) = pool_manager.get_cached_chain_tip() {
+        tracing::info!("headers.subscribe: serving cached tip height={}", height);
+        return Ok(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": { "height": height, "hex": hex },
+            "id": id
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "jsonrpc": "2.0",
+        "error": {
+            "code": -32000,
+            "message": "Indexer temporarily unavailable — retry in a few seconds"
+        },
+        "id": id
+    }))
+}
+
+fn pending_txids_for_scripthash(
+    pool_manager: &PoolManager,
+    scripthash: &str,
+    indexer_url: &str,
+) -> Vec<String> {
+    let mut pending = pool_manager.get_pending_txids_for_scripthash(scripthash);
+    if pending.is_empty() && pool_manager.has_pending_txs() {
+        pool_manager.enrich_pending_for_scripthash(scripthash, indexer_url);
+        pending = pool_manager.get_pending_txids_for_scripthash(scripthash);
+    }
+    pending
 }
 
 async fn handle_one_subrequest(
@@ -586,6 +914,78 @@ async fn handle_one_subrequest(
         return local_electrum_response(request, config).ok_or_else(|| {
             anyhow::anyhow!("no local response for {}", request.method)
         });
+    }
+
+    if let Some(resp) = local_fast_response(request) {
+        return Ok(resp);
+    }
+
+    if is_broadcast_method(&request.method) {
+        return Ok(serde_json::json!({
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32603,
+                "message": format!("{} must use intercept path", request.method)
+            },
+            "id": request.id
+        }));
+    }
+
+    // Sparrow polls get_history/get_mempool after broadcast — never block on electrs when pool has txs.
+    if request.method == "blockchain.scripthash.get_history"
+        || request.method == "blockchain.scripthash.get_mempool"
+    {
+        if let Some(sh) = scripthash_from_params(&request.params) {
+            let pending = pending_txids_for_scripthash(pool_manager, &sh, indexer_url);
+            if !pending.is_empty() {
+                tracing::info!(
+                    "Fast {} for {} ({} pool tx(s))",
+                    request.method,
+                    &sh[..sh.len().min(16)],
+                    pending.len()
+                );
+                let result = if request.method == "blockchain.scripthash.get_mempool" {
+                    pending::inject_get_mempool(serde_json::json!([0, []]), &pending)
+                } else {
+                    let history: Vec<serde_json::Value> = pending
+                        .iter()
+                        .map(|txid| {
+                            serde_json::json!({
+                                "tx_hash": txid,
+                                "height": 0
+                            })
+                        })
+                        .collect();
+                    serde_json::Value::Array(history)
+                };
+                return Ok(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "result": result,
+                    "id": request.id
+                }));
+            }
+        }
+    }
+
+    if request.method == "blockchain.scripthash.subscribe" {
+        if let Some(sh) = scripthash_from_params(&request.params) {
+            session.subscribed_scripthashes.insert(sh.clone());
+            let pending = pending_txids_for_scripthash(pool_manager, &sh, indexer_url);
+            if !pending.is_empty() {
+                if let Some(hash) = pending::compute_modified_status_hash(vec![], &sh, &pending) {
+                    tracing::info!(
+                        "Fast scripthash.subscribe for {} ({} pool tx(s))",
+                        &sh[..sh.len().min(16)],
+                        pending.len()
+                    );
+                    return Ok(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "result": hash,
+                        "id": request.id
+                    }));
+                }
+            }
+        }
     }
 
     if request.method == "blockchain.transaction.get" {
@@ -605,35 +1005,8 @@ async fn handle_one_subrequest(
         }
     }
 
-    if request.method == "blockchain.transaction.broadcast" {
-        if let Some(ref params) = request.params {
-            if let Some(hex_param) = params_first_string(params) {
-                if let Err(e) = intercept_and_handle_broadcast(
-                    client_stream,
-                    request.id.clone(),
-                    hex_param,
-                    pool_manager,
-                    config,
-                    indexer_url,
-                    source_label,
-                    session,
-                )
-                .await
-                {
-                    tracing::error!("Broadcast handler error ({}): {}", source_label, e);
-                }
-                return Ok(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "error": { "code": -32603, "message": "Broadcast handled out-of-band" },
-                    "id": request.id
-                }));
-            }
-        }
-        return Ok(serde_json::json!({
-            "jsonrpc": "2.0",
-            "error": { "code": -32602, "message": "Invalid params" },
-            "id": request.id
-        }));
+    if request.method == "blockchain.headers.subscribe" {
+        return handle_headers_subscribe(request, pool_manager, indexer_url).await;
     }
 
     if !indexer_url.is_empty() {
@@ -679,6 +1052,29 @@ struct BroadcastPreview {
     txid: String,
 }
 
+fn quick_locktime_hint(tx_hex: &str) -> String {
+    let tx_hex_clean = tx_hex.trim();
+    let Ok(raw) = hex::decode(tx_hex_clean) else {
+        return "?".to_string();
+    };
+    let mut cursor = std::io::Cursor::new(&raw);
+    let Ok(tx) = Transaction::consensus_decode(&mut cursor) else {
+        return "?".to_string();
+    };
+    let nlocktime: u32 = match tx.lock_time {
+        bitcoin::absolute::LockTime::Blocks(height) => height.to_consensus_u32(),
+        bitcoin::absolute::LockTime::Seconds(time) => time.to_consensus_u32(),
+        _ => 0,
+    };
+    if nlocktime == 0 {
+        "0 (manual/immediate)".to_string()
+    } else if nlocktime > 500_000_000 {
+        format!("{} (timestamp)", nlocktime)
+    } else {
+        format!("{} (block height)", nlocktime)
+    }
+}
+
 fn quick_broadcast_preview(tx_hex: &str) -> Result<BroadcastPreview> {
     let tx_hex_clean = tx_hex.trim();
     hex::decode(tx_hex_clean).context("Invalid transaction hex")?;
@@ -686,57 +1082,37 @@ fn quick_broadcast_preview(tx_hex: &str) -> Result<BroadcastPreview> {
     Ok(BroadcastPreview { txid })
 }
 
-async fn notify_subscriptions(
+async fn notify_subscribed_pending_mempool(
     client_stream: &mut tokio::net::TcpStream,
     subscribed: &HashSet<String>,
-    scripthashes: &[String],
-    pool_manager: Arc<PoolManager>,
-    indexer_url: String,
+    pool_manager: &PoolManager,
+    txid_hint: &str,
+    indexer_url: &str,
 ) -> Result<()> {
-    for sh in scripthashes {
-        if !subscribed.contains(sh) {
+    for sh in subscribed {
+        pool_manager.enrich_pending_for_scripthash(sh, indexer_url);
+        let pending = pool_manager.get_pending_txids_for_scripthash(sh);
+        if pending.is_empty() || !pending.iter().any(|t| t == txid_hint) {
             continue;
         }
-        let sh_clone = sh.clone();
-        let pm = pool_manager.clone();
-        let url = indexer_url.clone();
-        let new_hash = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::task::spawn_blocking(move || {
-                let real_history = fetch_scripthash_history_sync(&sh_clone, &url);
-                let pending = pm.get_pending_txids_for_scripthash(&sh_clone);
-                pending::compute_modified_status_hash(real_history, &sh_clone, &pending)
-            }),
-        )
-        .await;
-
-        let new_hash = match new_hash {
-            Ok(Ok(h)) => h,
-            Ok(Err(e)) => {
-                tracing::warn!("Subscription notify task failed for {}: {}", &sh[..sh.len().min(16)], e);
-                continue;
-            }
-            Err(_) => {
-                tracing::warn!("Subscription notify timed out for {}", &sh[..sh.len().min(16)]);
-                continue;
-            }
+        let Some(hash) = pending::compute_modified_status_hash(vec![], sh, &pending) else {
+            continue;
         };
-
-        if let Some(hash) = new_hash {
-            tracing::info!(
-                "Sending subscription notification for scripthash {}",
-                &sh[..sh.len().min(16)]
-            );
-            let notification = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "blockchain.scripthash.subscribe",
-                "params": [sh, hash]
-            });
-            client_stream
-                .write_all(&serde_json::to_vec(&notification)?)
-                .await?;
-            client_stream.write_all(b"\n").await?;
-        }
+        tracing::info!(
+            "Mempool notify for scripthash {} (txid={})",
+            &sh[..sh.len().min(16)],
+            &txid_hint[..txid_hint.len().min(16)]
+        );
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "blockchain.scripthash.subscribe",
+            "params": [sh, hash]
+        });
+        client_stream
+            .write_all(&serde_json::to_vec(&notification)?)
+            .await?;
+        client_stream.write_all(b"\n").await?;
+        client_stream.flush().await?;
     }
     Ok(())
 }
@@ -749,11 +1125,14 @@ async fn intercept_and_handle_broadcast(
     config: &Arc<Mutex<Config>>,
     indexer_url: &str,
     source_label: &str,
-    session: &SessionState,
+    session: &mut SessionState,
 ) -> Result<()> {
+    session.broadcast_intercepted = true;
+    let lock_hint = quick_locktime_hint(&hex_param);
     tracing::info!(
-        "INTERCEPTED blockchain.transaction.broadcast (hex len={})",
-        hex_param.len()
+        "INTERCEPTED broadcast RPC (hex len={}, nLockTime={})",
+        hex_param.len(),
+        lock_hint
     );
 
     let hex_quick = hex_param.clone();
@@ -805,57 +1184,142 @@ async fn intercept_and_handle_broadcast(
         }
     };
 
-    write_json_rpc_response(
-        client_stream,
-        &serde_json::json!({
-            "jsonrpc": "2.0",
-            "result": preview.txid,
-            "id": id
-        }),
-    )
-    .await?;
-    tracing::info!("Broadcast ack sent to wallet, txid={}", preview.txid);
-
+    // Ingest before ack: Sparrow polls get_history immediately after txid and expects height 0.
     let pm = pool_manager.clone();
     let cfg = config.clone();
     let url = indexer_url.to_string();
     let src = source_label.to_string();
     let hex_owned = hex_param;
 
-    let ingest = tokio::task::spawn_blocking(move || {
-        handle_broadcast(&hex_owned, &pm, &cfg, &url, &src)
-    })
+    let ingest = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || {
+            handle_broadcast(&hex_owned, &pm, &cfg, &url, &src)
+        }),
+    )
     .await;
 
-    match ingest {
-        Ok(Ok(result)) => {
-            tracing::info!("Broadcast ingested into pool, txid={}", result.txid);
-            if result.retained {
-                if let Err(e) = notify_subscriptions(
-                    client_stream,
-                    &session.subscribed_scripthashes,
-                    &result.affected_scripthashes,
-                    pool_manager.clone(),
-                    indexer_url.to_string(),
-                )
-                .await
-                {
-                    tracing::warn!("Post-broadcast subscription notify failed: {}", e);
-                }
-            }
+    let result = match ingest {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(e))) => {
+            tracing::error!("Broadcast ingest failed for {}: {}", preview.txid, e);
+            write_json_rpc_response(
+                client_stream,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": { "code": -25, "message": e.to_string() },
+                    "id": id
+                }),
+            )
+            .await?;
+            return Ok(());
         }
-        Ok(Err(e)) => tracing::error!(
-            "Broadcast ack sent but pool ingest failed for {}: {}",
-            preview.txid,
-            e
-        ),
-        Err(e) => tracing::error!(
-            "Broadcast ack sent but pool ingest task failed for {}: {}",
-            preview.txid,
-            e
-        ),
+        Err(_) => {
+            tracing::error!("Broadcast ingest timed out for {}", preview.txid);
+            write_json_rpc_response(
+                client_stream,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": { "code": -25, "message": "Broadcast ingest timed out — check electrs connection" },
+                    "id": id
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Broadcast ingest task failed for {}: {}", preview.txid, e);
+            write_json_rpc_response(
+                client_stream,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": { "code": -25, "message": e.to_string() },
+                    "id": id
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    tracing::info!("Broadcast ingested into pool, txid={}", result.txid);
+
+    write_json_rpc_response(
+        client_stream,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": result.txid,
+            "id": id
+        }),
+    )
+    .await?;
+    tracing::info!("Broadcast ack sent to wallet, txid={}", result.txid);
+
+    if result.retained {
+        if session.subscribed_scripthashes.is_empty() {
+            tracing::warn!(
+                "Broadcast ingested but no scripthash subscriptions on this session — Sparrow mempool poll relies on fast get_history"
+            );
+        }
+        if let Err(e) = notify_subscribed_pending_mempool(
+            client_stream,
+            &session.subscribed_scripthashes,
+            pool_manager,
+            &result.txid,
+            indexer_url,
+        )
+        .await
+        {
+            tracing::warn!("Post-broadcast mempool notify failed: {}", e);
+        }
+        if result.defer_input_enrichment {
+            let pm = pool_manager.clone();
+            let url = indexer_url.to_string();
+            let txid = result.txid.clone();
+            let hex = result.tx_hex.clone();
+            tokio::task::spawn_blocking(move || {
+                enrich_pending_input_scripthashes(&pm, &txid, &hex, &url);
+            });
+        }
     }
     Ok(())
+}
+
+fn enrich_pending_input_scripthashes(
+    pool_manager: &PoolManager,
+    txid: &str,
+    tx_hex: &str,
+    indexer_url: &str,
+) {
+    let indexer_addr = pending::strip_indexer_host(indexer_url);
+    let lookup = |id: &str| pool_manager.lookup_tx_hex(id);
+    let output_sh = pending::extract_affected_scripthashes_opts(tx_hex, "", true).unwrap_or_default();
+    match pending::enrich_input_scripthashes(
+        tx_hex,
+        &indexer_addr,
+        std::time::Duration::from_secs(8),
+        Some(&lookup),
+    ) {
+        Ok(extra) if !extra.is_empty() => {
+            pool_manager.merge_pending_scripthashes(txid, &extra);
+            tracing::info!(
+                "Background input scripthash enrichment for {}: {} output + {} input",
+                txid,
+                output_sh.len(),
+                extra.len()
+            );
+        }
+        Ok(_) => {
+            tracing::debug!("Background input enrichment for {} found no extra scripthashes", txid);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Background input scripthash enrichment failed for {}: {}",
+                txid,
+                e
+            );
+        }
+    }
 }
 
 pub struct ElectrumServer {
@@ -884,6 +1348,21 @@ impl ElectrumServer {
         let pool_sparrow = self.pool_manager.clone();
         let config_sparrow = self.config.clone();
         let host_sparrow = host.clone();
+        let pool_warm = self.pool_manager.clone();
+        let config_warm = self.config.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let url = resolve_live_indexer_url(&pool_warm, &config_warm);
+            if !url.is_empty() {
+                let pm = pool_warm.clone();
+                let u = url.clone();
+                if let Err(e) =
+                    tokio::task::spawn_blocking(move || warm_chain_tip_cache(&u, &pm)).await
+                {
+                    tracing::debug!("Chain tip warm task join error: {}", e);
+                }
+            }
+        });
         tokio::spawn(async move {
             if let Err(e) =
                 run_electrum_listener(host_sparrow, port, "sparrow", pool_sparrow, config_sparrow)
@@ -939,10 +1418,17 @@ async fn run_electrum_listener(
         match listener.accept().await {
             Ok((client_stream, peer_addr)) => {
                 tracing::info!(
-                    "Electrum client connected from {} [{}]",
+                    "Electrum client connected from {} [{}] (broadcast-pool v{})",
                     peer_addr,
-                    source_label
+                    source_label,
+                    env!("CARGO_PKG_VERSION")
                 );
+                if source_label == "sparrow" {
+                    tracing::warn!(
+                        "Sparrow [{}]: disable Tor proxy in Settings→Network or broadcasts bypass this pool (mempool.space) and txs never appear here",
+                        peer_addr
+                    );
+                }
                 let pool_manager = pool_manager.clone();
                 let config = config.clone();
                 tokio::spawn(async move {
@@ -994,6 +1480,63 @@ async fn process_client_line(
         return Ok(());
     }
 
+    session.rpc_lines_handled += 1;
+
+    // Handshake RPCs: always answer locally (never block on upstream electrs).
+    if let Ok(handshake) = parse_subrequests(line_str) {
+        if !handshake.is_empty()
+            && handshake
+                .iter()
+                .all(|r| is_local_handshake_method(&r.method))
+        {
+            let mut responses = Vec::with_capacity(handshake.len());
+            for req in &handshake {
+                if let Some(resp) = local_electrum_response(req, config) {
+                    responses.push(resp);
+                } else {
+                    responses.clear();
+                    break;
+                }
+            }
+            if responses.len() == handshake.len() {
+                let batch = line_is_batch(line_str);
+                write_client_responses(client_stream, &responses, batch).await?;
+                tracing::info!(
+                    "Electrum RPC from {}: [{}] (local handshake)",
+                    peer_addr,
+                    handshake
+                        .iter()
+                        .map(|r| r.method.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    log_incoming_client_line(peer_addr, line_str, source_label);
+
+    if line_str.len() > 280 {
+        tracing::info!(
+            "Electrum large RPC from {} [{}] len={} methods={:?}",
+            peer_addr,
+            source_label,
+            line_str.len(),
+            peek_line_methods(line_str)
+        );
+    }
+
+    if line_mentions_tx_rpc(line_str) {
+        if let Some(methods) = peek_line_methods(line_str) {
+            tracing::info!(
+                "Electrum tx/broadcast methods from {}: [{}]",
+                peer_addr,
+                methods.join(", ")
+            );
+        }
+    }
+
     if let Some((id, hex_param)) = extract_broadcast_hex(line_str) {
         if let Err(e) = intercept_and_handle_broadcast(
             client_stream,
@@ -1035,10 +1578,72 @@ async fn process_client_line(
     let subrequests = match parse_subrequests(line_str) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("Invalid client JSON from {}: {}", peer_addr, e);
+            tracing::warn!(
+                "Invalid client JSON from {} (len={}): {}",
+                peer_addr,
+                line_str.len(),
+                e
+            );
+            if line_mentions_tx_rpc(line_str) {
+                tracing::error!(
+                    "Invalid JSON on tx/broadcast line from {}: {}",
+                    peer_addr,
+                    &line_str[..line_str.len().min(200)]
+                );
+            }
+            let id = line_json_rpc_id(line_str);
+            write_json_rpc_response(
+                client_stream,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": { "code": -32700, "message": "Parse error" },
+                    "id": id
+                }),
+            )
+            .await?;
             return Ok(());
         }
     };
+
+    // Broadcast: always intercept locally (never proxy to electrs — non-final txs hang/reject).
+    if subrequests.iter().any(|r| is_broadcast_method(&r.method)) {
+        let broadcast_req = subrequests
+            .iter()
+            .find(|r| is_broadcast_method(&r.method))
+            .expect("checked any");
+        if let Some(hex_param) = broadcast_req
+            .params
+            .as_ref()
+            .and_then(params_first_string)
+        {
+            if let Err(e) = intercept_and_handle_broadcast(
+                client_stream,
+                broadcast_req.id.clone(),
+                hex_param,
+                pool_manager,
+                config,
+                indexer_url,
+                source_label,
+                session,
+            )
+            .await
+            {
+                tracing::error!("Broadcast handler error ({}): {}", source_label, e);
+            }
+        } else {
+            write_json_rpc_response(
+                client_stream,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": { "code": -32602, "message": "Invalid broadcast params" },
+                    "id": broadcast_req.id.clone()
+                }),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
     tracing::info!(
         "Electrum RPC from {}: [{}]",
         peer_addr,
@@ -1054,19 +1659,28 @@ async fn process_client_line(
     // Always answer each RPC immediately (Sparrow sends one method per line, not batches).
     let mut responses = Vec::with_capacity(subrequests.len());
     for req in &subrequests {
-        responses.push(
-            handle_one_subrequest(
-                req,
-                pool_manager,
-                config,
-                indexer_url,
-                indexer_stream,
-                session,
-                source_label,
-                client_stream,
-            )
-            .await?,
-        );
+        match handle_one_subrequest(
+            req,
+            pool_manager,
+            config,
+            indexer_url,
+            indexer_stream,
+            session,
+            source_label,
+            client_stream,
+        )
+        .await
+        {
+            Ok(resp) => responses.push(resp),
+            Err(e) => {
+                tracing::error!("RPC handler error for {}: {}", req.method, e);
+                responses.push(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "error": { "code": -32603, "message": e.to_string() },
+                    "id": req.id
+                }));
+            }
+        }
     }
     write_client_responses(client_stream, &responses, batch).await?;
     flush_deferred_indexer_out(session, client_stream).await?;
@@ -1080,16 +1694,13 @@ async fn handle_connection(
     peer_addr: std::net::SocketAddr,
     source_label: &'static str,
 ) -> Result<()> {
-    let indexer_url = {
-        let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
-        cfg.indexer.as_ref().map(|idx| idx.url.clone()).unwrap_or_default()
-    };
     let mut indexer_stream: Option<IndexerStream> = None;
 
     tracing::info!(
-        "Electrum session started for {} [{}] (sync RPC responses)",
+        "Electrum session started for {} [{}] (broadcast-pool v{}, sync RPC responses)",
         peer_addr,
-        source_label
+        source_label,
+        env!("CARGO_PKG_VERSION")
     );
 
     let mut client_buf = Vec::new();
@@ -1098,12 +1709,11 @@ async fn handle_connection(
     loop {
         let n = client_stream.read_buf(&mut client_buf).await?;
         if n == 0 {
+            session.log_disconnect_summary(peer_addr, source_label);
             break;
         }
-        while let Some(newline_pos) = client_buf.iter().position(|&b| b == b'\n') {
-            let line_bytes = client_buf[..newline_pos].to_vec();
-            client_buf.drain(..=newline_pos);
-            let line_str = String::from_utf8_lossy(&line_bytes).to_string();
+        while let Some((line_bytes, line_str)) = pop_client_line(&mut client_buf) {
+            let indexer_url = resolve_live_indexer_url(&pool_manager, &config);
 
             process_client_line(
                 &line_bytes,
@@ -1118,6 +1728,19 @@ async fn handle_connection(
                 &mut client_stream,
             )
             .await?;
+        }
+
+        if !client_buf.is_empty() && client_buf.len() >= 4096 {
+            let preview = String::from_utf8_lossy(&client_buf[..client_buf.len().min(120)]);
+            if line_mentions_tx_rpc(&preview) || preview.contains("method") {
+                tracing::warn!(
+                    "Electrum client {} [{}] buffered {} bytes without newline (preview={})",
+                    peer_addr,
+                    source_label,
+                    client_buf.len(),
+                    preview
+                );
+            }
         }
     }
 
@@ -1180,285 +1803,6 @@ fn parse_json_rpc(data: &[u8]) -> Result<Option<(JsonRpcRequest, usize)>> {
     }
 }
 
-async fn process_request(
-    request: JsonRpcRequest,
-    pool_manager: &Arc<PoolManager>,
-    config: &Arc<Mutex<Config>>,
-) -> serde_json::Value {
-    let id = request.id.clone();
-    tracing::debug!("Received Electrum request: method={}", request.method);
-
-    let should_forward = matches!(
-        request.method.as_str(),
-        "blockchain.scripthash.get_balance"
-            | "blockchain.scripthash.get_history"
-            | "blockchain.scripthash.listunspent"
-            | "blockchain.scripthash.subscribe"
-            | "blockchain.scripthash.get_mempool"
-            | "blockchain.transaction.get"
-            | "blockchain.transaction.get_merkle"
-            | "blockchain.block.header"
-            | "blockchain.block.headers"
-            | "blockchain.block.get_block"
-            | "blockchain.transaction.id_from_pos"
-            | "blockchain.headers.subscribe"
-            | "blockchain.numblocks.subscribe"
-    );
-
-    if should_forward {
-        let indexer_url = {
-            let cfg = config.lock().ok();
-            cfg.and_then(|c| c.indexer.as_ref().map(|i| i.url.clone()))
-        };
-
-        if let Some(indexer_url) = indexer_url {
-            let raw_request = serde_json::to_string(&request).unwrap_or_default();
-            let indexer_url_clone = indexer_url.clone();
-            let method = request.method.clone();
-            tracing::debug!("Forwarding {} to indexer at {}", method, indexer_url);
-
-            let response_str = tokio::task::spawn_blocking(move || {
-                forward_to_indexer_sync(&raw_request, &indexer_url_clone)
-            }).await.unwrap_or(None);
-
-            if let Some(response_str) = response_str {
-                tracing::debug!("Indexer response for {} (first 200 chars): {}", method, &response_str[..response_str.len().min(200)]);
-                match serde_json::from_str::<serde_json::Value>(&response_str) {
-                    Ok(val) => return val,
-                    Err(e) => {
-                        tracing::warn!("Failed to parse indexer response for {}: {}", method, e);
-                    }
-                }
-            } else {
-                tracing::warn!("Failed to connect to indexer for {}", method);
-            }
-        }
-    }
-
-    match request.method.as_str() {
-        "server.version" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": ["broadcast-pool v1.0", "1.4"],
-                "id": id
-            })
-        }
-        "server.banner" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": "broadcast-pool v1.0 - Bitcoin Transaction Pool",
-                "id": id
-            })
-        }
-        "server.ping" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": true,
-                "id": id
-            })
-        }
-        "server.features" => {
-            let genesis = {
-                config
-                    .lock()
-                    .ok()
-                    .map(|c| c.network.network_type.genesis_hash().to_string())
-                    .unwrap_or_else(|| "0000000000000000000000000000000000000000000000000000000000000000".to_string())
-            };
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": {
-                    "protocol_version": "1.4",
-                    "server_version": "broadcast-pool v1.0",
-                    "genesis_hash": genesis,
-                    "hosts": {},
-                    "protocol_max": "1.4",
-                    "protocol_min": "1.0",
-                    "settings": {},
-                    "hash_function": "sha256"
-                },
-                "id": id
-            })
-        }
-        "blockchain.transaction.broadcast" => {
-            if let Some(params) = request.params.as_ref().and_then(|p| p.as_array()) {
-                if let Some(hex_param) = params.get(0).and_then(|v| v.as_str()) {
-                    tracing::info!("broadcast request received, tx_hex length: {}", hex_param.len());
-                    match handle_broadcast(hex_param, pool_manager, config, "", "sparrow") {
-                        Ok(result) => {
-                            tracing::info!("Broadcast success, returning txid: {}", result.txid);
-                            return serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "result": result.txid,
-                                "id": id
-                            });
-                        }
-                        Err(e) => {
-                            tracing::error!("Broadcast failed: {}", e);
-                            return serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "error": {
-                                    "code": -25,
-                                    "message": e.to_string()
-                                },
-                                "id": id
-                            });
-                        }
-                    }
-                }
-            }
-
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "error": {
-                    "code": -32602,
-                    "message": "Invalid params"
-                },
-                "id": id
-            })
-        }
-        "blockchain.headers.subscribe" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": {
-                    "hex": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-                    "height": 0
-                },
-                "id": id
-            })
-        }
-        "blockchain.scripthash.get_balance" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": {
-                    "confirmed": 0,
-                    "unconfirmed": 0
-                },
-                "id": id
-            })
-        }
-        "blockchain.scripthash.get_history" | "blockchain.scripthash.get_mempool" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": [],
-                "id": id
-            })
-        }
-        "blockchain.scripthash.listunspent" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": [],
-                "id": id
-            })
-        }
-        "blockchain.scripthash.subscribe" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": {
-                    "confirmed": 0,
-                    "unconfirmed": 0
-                },
-                "id": id
-            })
-        }
-        "mempool.get_fee_histogram" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": [],
-                "id": id
-            })
-        }
-        "blockchain.relayfee" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": 1.0,
-                "id": id
-            })
-        }
-        "blockchain.estimatefee" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": 10.0,
-                "id": id
-            })
-        }
-        "blockchain.util.links" | "blockchain.scripthash.get_mempool" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": [],
-                "id": id
-            })
-        }
-        "blockchain.numblocks.subscribe" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": 0,
-                "id": id
-            })
-        }
-        "blockchain.transaction.get" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": "",
-                "id": id
-            })
-        }
-        "blockchain.block.get_block" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": "",
-                "id": id
-            })
-        }
-        "blockchain.block.header" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-                "id": id
-            })
-        }
-        "blockchain.transaction.id_from_pos" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": null,
-                "id": id
-            })
-        }
-        "server.add_peer" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": true,
-                "id": id
-            })
-        }
-        "server.peers" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": [],
-                "id": id
-            })
-        }
-        "server.history" => {
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": [],
-                "id": id
-            })
-        }
-        _ => {
-            tracing::warn!("Unhandled method: {}", request.method);
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "error": {
-                    "code": -32601,
-                    "message": format!("Method '{}' not found", request.method)
-                },
-                "id": id
-            })
-        }
-    }
-}
-
 fn resolve_ingest_plan(
     source_label: &str,
     nlocktime: u32,
@@ -1474,11 +1818,12 @@ fn resolve_ingest_plan(
     }
     // Timestamp nLockTime (Sparrow MTP-by-date or block MTP converted to unix time).
     if nlocktime > 500_000_000 {
+        let scheduled = chrono::DateTime::from_timestamp(nlocktime as i64, 0);
         tracing::info!(
             "Timestamp nLockTime {} → scheduled (MTP enforced when broadcasting)",
             nlocktime
         );
-        return (BroadcastMode::Scheduled, None);
+        return (BroadcastMode::Scheduled, scheduled);
     }
     // Block-height nLockTime — no indexer RPC at ingest; scheduler waits for chain height.
     if nlocktime > 0 && nlocktime < 500_000_000 {
@@ -1536,7 +1881,7 @@ fn handle_broadcast(
     tx_hex: &str,
     pool_manager: &Arc<PoolManager>,
     config: &Arc<Mutex<Config>>,
-    indexer_url: &str,
+    _indexer_url: &str,
     source_label: &str,
 ) -> Result<BroadcastHandleResult> {
     tracing::info!("handle_broadcast called with tx_hex length: {}", tx_hex.len());
@@ -1610,22 +1955,18 @@ fn handle_broadcast(
         imported_tx.id
     );
 
-    fn store_retained(
+    fn store_pending_outputs(
         pool_manager: &PoolManager,
         txid: &str,
         tx_hex: &str,
-        indexer_url: &str,
-    ) -> Result<Vec<String>> {
-        let url = if indexer_url.is_empty() {
-            pool_manager
-                .get_indexer_url()
-                .context("No indexer configured")?
-        } else {
-            indexer_url.to_string()
-        };
-        let indexer_addr = pending::strip_indexer_host(&url);
-        let scripthashes = pending::extract_affected_scripthashes_opts(tx_hex, &indexer_addr, true)?;
-        let outputs: Vec<PendingTxOutput> = pending::extract_outputs(tx_hex)?
+    ) -> Vec<String> {
+        let output_sh = pending::extract_affected_scripthashes_opts(tx_hex, "", true)
+            .unwrap_or_else(|e| {
+                tracing::warn!("Could not derive output scripthashes for {}: {}", txid, e);
+                Vec::new()
+            });
+        let outputs: Vec<PendingTxOutput> = pending::extract_outputs(tx_hex)
+            .unwrap_or_default()
             .into_iter()
             .map(|(output_index, value, scripthash)| PendingTxOutput {
                 output_index,
@@ -1633,12 +1974,18 @@ fn handle_broadcast(
                 scripthash,
             })
             .collect();
-        pool_manager.store_pending_tx(txid, tx_hex, scripthashes.clone(), outputs);
-        Ok(scripthashes)
+        pool_manager.store_pending_tx(txid, tx_hex, output_sh.clone(), outputs);
+        if output_sh.is_empty() {
+            tracing::warn!(
+                "Stored {} without output scripthashes — Sparrow mempool poll may fail until enrichment",
+                txid
+            );
+        }
+        output_sh
     }
 
-    // Protocol: always retain in virtual mempool; scheduler emits to the network
-    let scripthashes = store_retained(pool_manager, &txid, tx_hex_clean, indexer_url)?;
+    // Phase 1 only before Sparrow ack; input scripthashes enriched in background after ack.
+    let scripthashes = store_pending_outputs(pool_manager, &txid, tx_hex_clean);
 
     if broadcast_mode == BroadcastMode::Immediate {
         if let Err(e) = pool_manager.mark_as_due(&imported_tx.id) {
@@ -1647,15 +1994,141 @@ fn handle_broadcast(
     }
 
     tracing::info!(
-        "Retained tx {} in virtual mempool (mode: {}, pool_id: {})",
+        "Retained tx {} in virtual mempool (mode: {}, pool_id: {}, {} output sh)",
         txid,
         broadcast_mode,
-        imported_tx.id
+        imported_tx.id,
+        scripthashes.len()
     );
 
     Ok(BroadcastHandleResult {
         txid,
+        tx_hex: tx_hex_clean.to_string(),
         retained: true,
         affected_scripthashes: scripthashes,
+        defer_input_enrichment: true,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_TX: &str = "0100000002f327e86da3e66bd20e1129b1fb36d07056f0b9a117199e759396526b8f3a20780000000000fffffffff0ede03d75050f20801d50358829ae02c058e8677d2cc74df51f738285013c260000000000ffffffff02f028d6dc010000001976a914ffb035781c3c69e076d48b60c3d38592e7ce06a788ac00ca9a3b000000001976a914fa5139067622fd7e1e722a05c17c2bb7d5fd6df088ac00000000";
+
+    #[test]
+    fn extract_broadcast_hex_array_params() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"blockchain.transaction.broadcast","params":["{}"],"id":42}}"#,
+            SAMPLE_TX
+        );
+        let (id, hex) = extract_broadcast_hex(&line).expect("array params");
+        assert_eq!(id, serde_json::json!(42));
+        assert_eq!(hex, SAMPLE_TX);
+    }
+
+    #[test]
+    fn extract_broadcast_hex_string_params() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"blockchain.transaction.broadcast","params":"{}","id":7}}"#,
+            SAMPLE_TX
+        );
+        let (id, hex) = extract_broadcast_hex(&line).expect("string params");
+        assert_eq!(id, serde_json::json!(7));
+        assert_eq!(hex, SAMPLE_TX);
+    }
+
+    #[test]
+    fn extract_broadcast_hex_sparrow_single_param() {
+        // Sparrow SimpleElectrumServerRpc uses .params(txHex) — often serializes as bare string.
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"blockchain.transaction.broadcast","params":"{}","id":99}}"#,
+            SAMPLE_TX
+        );
+        assert!(line_looks_like_broadcast(&line));
+        assert!(extract_broadcast_hex(&line).is_some());
+    }
+
+    #[test]
+    fn extract_broadcast_package_first_tx() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"blockchain.transaction.broadcast_package","params":[["{}","02000000ffffffff0100"]],"id":3}}"#,
+            SAMPLE_TX
+        );
+        let (_, hex) = extract_broadcast_hex(&line).expect("package");
+        assert_eq!(hex, SAMPLE_TX);
+    }
+
+    #[test]
+    fn resolve_ingest_timestamp_locktime_is_scheduled() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [network]
+            type = "signet"
+            [pool]
+            max_size_kb = 300
+            rebroadcast_interval_minutes = 30
+            expiry_days = 14
+            [privacy]
+            use_tor = false
+            tor_socks_port = 9050
+            rotate_identity_per_tx = false
+            "#,
+        )
+        .expect("test config");
+        let (mode, sched) = resolve_ingest_plan("sparrow", 1_750_000_000, &cfg);
+        assert_eq!(mode, BroadcastMode::Scheduled);
+        assert!(sched.is_some());
+    }
+
+    #[test]
+    fn resolve_ingest_block_height_locktime_is_by_block() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [network]
+            type = "signet"
+            [pool]
+            max_size_kb = 300
+            rebroadcast_interval_minutes = 30
+            expiry_days = 14
+            [privacy]
+            use_tor = false
+            tor_socks_port = 9050
+            rotate_identity_per_tx = false
+            "#,
+        )
+        .expect("test config");
+        let (mode, _) = resolve_ingest_plan("sparrow", 900_000, &cfg);
+        assert_eq!(mode, BroadcastMode::ByBlock);
+    }
+
+    #[test]
+    fn local_fast_response_estimatefee() {
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".into()),
+            method: "blockchain.estimatefee".into(),
+            params: Some(serde_json::json!([6])),
+            id: serde_json::json!(1),
+        };
+        let resp = local_fast_response(&req).expect("estimatefee");
+        assert!(resp.get("result").is_some());
+    }
+
+    #[test]
+    fn parse_headers_subscribe_rejects_height_zero() {
+        let zero = serde_json::json!({"result":{"height":0,"hex":"abc"}});
+        assert!(parse_headers_subscribe_result(&zero).is_none());
+        let ok = serde_json::json!({"result":{"height":100,"hex":"deadbeef"}});
+        assert_eq!(
+            parse_headers_subscribe_result(&ok),
+            Some((100, "deadbeef".to_string()))
+        );
+    }
+
+    #[test]
+    fn fast_scripthash_extract_is_outputs_only() {
+        use crate::pool::virtual_mempool as pending;
+        let fast = pending::extract_affected_scripthashes_opts(SAMPLE_TX, "", true).expect("fast");
+        assert_eq!(fast.len(), 2, "sample tx has two outputs");
+    }
 }

@@ -33,6 +33,8 @@ pub struct PoolManager {
     config: Arc<Mutex<Config>>,
     pending_txs: Arc<Mutex<HashMap<String, PendingTxInfo>>>,
     mtp_cache: Arc<Mutex<Option<(Instant, u64)>>>,
+    /// Last successful `blockchain.headers.subscribe` from electrs (height, header hex).
+    cached_chain_tip: Arc<Mutex<Option<(u64, String)>>>,
     price_feed: PriceFeed,
 }
 
@@ -50,8 +52,22 @@ impl PoolManager {
             config,
             pending_txs: Arc::new(Mutex::new(HashMap::new())),
             mtp_cache: Arc::new(Mutex::new(None)),
+            cached_chain_tip: Arc::new(Mutex::new(None)),
             price_feed: PriceFeed::new(),
         }
+    }
+
+    pub fn cache_chain_tip(&self, height: u64, hex: String) {
+        if height == 0 || hex.is_empty() {
+            return;
+        }
+        if let Ok(mut cache) = self.cached_chain_tip.lock() {
+            *cache = Some((height, hex));
+        }
+    }
+
+    pub fn get_cached_chain_tip(&self) -> Option<(u64, String)> {
+        self.cached_chain_tip.lock().ok()?.clone()
     }
 
     fn require_rpc(&self) -> Result<&BitcoinRpc> {
@@ -975,6 +991,34 @@ impl PoolManager {
         );
     }
 
+    /// Merge additional scripthashes (e.g. input addresses after electrs enrichment).
+    pub fn merge_pending_scripthashes(&self, txid: &str, extra: &[String]) {
+        if extra.is_empty() {
+            return;
+        }
+        let mut pending = match self.lock_pending() {
+            Some(p) => p,
+            None => return,
+        };
+        let Some(info) = pending.get_mut(txid) else {
+            return;
+        };
+        let before = info.scripthashes.len();
+        for sh in extra {
+            if !info.scripthashes.contains(sh) {
+                info.scripthashes.push(sh.clone());
+            }
+        }
+        if info.scripthashes.len() > before {
+            tracing::info!(
+                "Enriched pending tx {} scripthashes: {} → {}",
+                txid,
+                before,
+                info.scripthashes.len()
+            );
+        }
+    }
+
     pub fn lookup_tx_hex(&self, txid: &str) -> Option<String> {
         let normalized = txid.trim().to_lowercase();
         if let Some(hex) = self.get_pending_tx_hex(&normalized) {
@@ -1023,6 +1067,45 @@ impl PoolManager {
         self.lock_pending()
             .map(|pending| pending.clone())
             .unwrap_or_default()
+    }
+
+    pub fn has_pending_txs(&self) -> bool {
+        self.lock_pending()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Sparrow polls INPUT scripthashes after broadcast; enrich on demand when phase-2 ingest missed.
+    pub fn enrich_pending_for_scripthash(&self, scripthash: &str, indexer_url: &str) {
+        if scripthash.is_empty() {
+            return;
+        }
+        if !self.has_pending_txs() {
+            return;
+        }
+        let indexer_addr = super::virtual_mempool::strip_indexer_host(indexer_url);
+        let budget = std::time::Duration::from_millis(2500);
+        let lookup = |id: &str| self.lookup_tx_hex(id);
+        let pending = self.get_all_pending_txs();
+        for (txid, info) in pending {
+            if info.scripthashes.contains(&scripthash.to_string()) {
+                continue;
+            }
+            match super::virtual_mempool::enrich_input_scripthashes(
+                &info.tx_hex,
+                &indexer_addr,
+                budget,
+                Some(&lookup),
+            ) {
+                Ok(extra) if !extra.is_empty() => {
+                    self.merge_pending_scripthashes(&txid, &extra);
+                }
+                Err(e) => {
+                    tracing::warn!("On-demand scripthash enrich failed for {}: {}", txid, e);
+                }
+                Ok(_) => {}
+            }
+        }
     }
 
     pub fn get_pending_txids_for_scripthash(&self, scripthash: &str) -> Vec<String> {
