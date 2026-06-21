@@ -61,6 +61,15 @@ for name, req in methods:
 print("passed", ok, "of", len(methods))
 s.close()
 PY
+echo "=== nc one-liner (Sparrow line protocol) ==="
+REQ='{"jsonrpc":"2.0","method":"server.version","params":["Sparrow Wallet","1.4"],"id":99}'
+OUT=$(printf '%s\n' "$REQ" | nc -N -w 5 127.0.0.1 50050 2>&1 || true)
+if echo "$OUT" | grep -q '"result"'; then
+  echo "OK  nc server.version via -N"
+else
+  echo "FAIL nc server.version:" "$OUT"
+  exit 1
+fi
 kill $BP $FE 2>/dev/null || true
 wait $BP 2>/dev/null || true
 wait $FE 2>/dev/null || true
