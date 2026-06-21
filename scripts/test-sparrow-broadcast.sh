@@ -59,6 +59,7 @@ def test_broadcast(label, tx_hex):
     s.settimeout(12)
     for name, req in [
         ("server.version", {"jsonrpc":"2.0","method":"server.version","params":["Sparrow Wallet","1.4"],"id":0}),
+        ("scripthash.subscribe", {"jsonrpc":"2.0","method":"blockchain.scripthash.subscribe","params":[sh],"id":2}),
         ("blockchain.estimatefee", {"jsonrpc":"2.0","method":"blockchain.estimatefee","params":[6],"id":1}),
         ("blockchain.transaction.broadcast", {"jsonrpc":"2.0","method":"blockchain.transaction.broadcast","params":tx_hex,"id":3}),
     ]:
