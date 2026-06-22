@@ -339,8 +339,6 @@ struct BroadcastHandleResult {
     tx_hex: String,
     retained: bool,
     affected_scripthashes: Vec<String>,
-    /// Input scripthash enrichment deferred until after Sparrow ack (electrs can be slow on Umbrel).
-    defer_input_enrichment: bool,
 }
 
 struct SessionState {
@@ -1295,7 +1293,29 @@ async fn intercept_and_handle_broadcast(
         }
     };
 
-    // Invariant 5: Sparrow polls immediately after ack — set before ack, never wait on ingest.
+    // ── Phase 1: Store output scripthashes SYNCHRONOUSLY before ack ──
+    // Sparrow polls immediately after ack — the tx must be visible in the
+    // virtual mempool the instant the ack is sent, otherwise Sparrow stays
+    // stuck in "broadcasting" forever.
+    let output_sh = pending::extract_affected_scripthashes_opts(&hex_param, "", true)
+        .unwrap_or_default();
+    let outputs: Vec<PendingTxOutput> = pending::extract_outputs(&hex_param)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(output_index, value, scripthash)| PendingTxOutput {
+            output_index,
+            value,
+            scripthash,
+        })
+        .collect();
+    pool_manager.store_pending_tx(&preview.txid, &hex_param, output_sh.clone(), outputs);
+    tracing::info!(
+        "Pre-ack virtual mempool: txid={} stored with {} output scripthashes",
+        preview.txid,
+        output_sh.len()
+    );
+
+    // Invariant 5: Sparrow polls immediately after ack — set before ack.
     session.recent_broadcast_txid = Some(preview.txid.clone());
 
     write_json_rpc_response(
@@ -1307,9 +1327,9 @@ async fn intercept_and_handle_broadcast(
         }),
     )
     .await?;
-    tracing::info!("Broadcast ack sent to wallet (pre-ingest), txid={}", preview.txid);
+    tracing::info!("Broadcast ack sent to wallet (outputs pre-stored), txid={}", preview.txid);
 
-    // Ingest in background — never block read loop or tokio workers (avoids accept starvation).
+    // ── Phase 2: DB insert + input scripthash enrichment in background ──
     let pm = pool_manager.clone();
     let cfg = config.clone();
     let src = source_label.to_string();
@@ -1319,7 +1339,7 @@ async fn intercept_and_handle_broadcast(
     tokio::spawn(async move {
         let pm_enrich = pm.clone();
         let ingest = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(10),
             tokio::task::spawn_blocking(move || {
                 handle_broadcast(&hex_owned, &pm, &cfg, &src)
             }),
@@ -1329,14 +1349,12 @@ async fn intercept_and_handle_broadcast(
         match ingest {
             Ok(Ok(Ok(result))) => {
                 tracing::info!("Broadcast ingested into pool, txid={}", result.txid);
-                if result.defer_input_enrichment {
-                    let url = pm_enrich.get_indexer_url().unwrap_or_default();
-                    let txid = result.txid.clone();
-                    let hex = result.tx_hex.clone();
-                    tokio::task::spawn_blocking(move || {
-                        enrich_pending_input_scripthashes(&pm_enrich, &txid, &hex, &url);
-                    });
-                }
+                let url = pm_enrich.get_indexer_url().unwrap_or_default();
+                let txid = result.txid.clone();
+                let hex = result.tx_hex.clone();
+                tokio::task::spawn_blocking(move || {
+                    enrich_pending_input_scripthashes(&pm_enrich, &txid, &hex, &url);
+                });
             }
             Ok(Ok(Err(e))) => {
                 tracing::error!("Broadcast ingest failed for {}: {}", preview_txid, e);
@@ -1886,41 +1904,77 @@ async fn handle_connection(
 
     let mut client_buf = Vec::new();
     let mut session = SessionState::new();
+    let mut scripthash_rx = pool_manager.subscribe_scripthash_changes();
 
     loop {
-        let n = client_stream.read_buf(&mut client_buf).await?;
-        if n == 0 {
-            session.log_disconnect_summary(peer_addr, source_label);
-            break;
-        }
-        while let Some((line_bytes, line_str)) = pop_client_line(&mut client_buf) {
-            let indexer_url = resolve_live_indexer_url(&pool_manager, &config);
+        tokio::select! {
+            result = client_stream.read_buf(&mut client_buf) => {
+                let n = result?;
+                if n == 0 {
+                    session.log_disconnect_summary(peer_addr, source_label);
+                    break;
+                }
+                while let Some((line_bytes, line_str)) = pop_client_line(&mut client_buf) {
+                    let indexer_url = resolve_live_indexer_url(&pool_manager, &config);
 
-            process_client_line(
-                &line_bytes,
-                &line_str,
-                peer_addr,
-                &pool_manager,
-                &config,
-                &indexer_url,
-                &mut indexer_stream,
-                &mut session,
-                source_label,
-                &mut client_stream,
-            )
-            .await?;
-        }
+                    process_client_line(
+                        &line_bytes,
+                        &line_str,
+                        peer_addr,
+                        &pool_manager,
+                        &config,
+                        &indexer_url,
+                        &mut indexer_stream,
+                        &mut session,
+                        source_label,
+                        &mut client_stream,
+                    )
+                    .await?;
+                }
 
-        if !client_buf.is_empty() && client_buf.len() >= 4096 {
-            let preview = String::from_utf8_lossy(&client_buf[..client_buf.len().min(120)]);
-            if line_mentions_tx_rpc(&preview) || preview.contains("method") {
-                tracing::warn!(
-                    "Electrum client {} [{}] buffered {} bytes without newline (preview={})",
-                    peer_addr,
-                    source_label,
-                    client_buf.len(),
-                    preview
-                );
+                if !client_buf.is_empty() && client_buf.len() >= 4096 {
+                    let preview = String::from_utf8_lossy(&client_buf[..client_buf.len().min(120)]);
+                    if line_mentions_tx_rpc(&preview) || preview.contains("method") {
+                        tracing::warn!(
+                            "Electrum client {} [{}] buffered {} bytes without newline (preview={})",
+                            peer_addr,
+                            source_label,
+                            client_buf.len(),
+                            preview
+                        );
+                    }
+                }
+            }
+            Ok(notification) = scripthash_rx.recv() => {
+                if session.subscribed_scripthashes.contains(&notification.scripthash) {
+                    let indexer_url = resolve_live_indexer_url(&pool_manager, &config);
+                    let pending = pending_txids_for_scripthash_with_session(
+                        &pool_manager,
+                        &notification.scripthash,
+                        &indexer_url,
+                        Some(&session),
+                    );
+                    if let Some(hash) = pending::compute_modified_status_hash(vec![], &notification.scripthash, &pending) {
+                        let notification_json = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "blockchain.scripthash.subscribe",
+                            "params": [notification.scripthash, hash]
+                        });
+                        if let Ok(payload) = serde_json::to_vec(&notification_json) {
+                            let mut out = payload;
+                            out.push(b'\n');
+                            if client_stream.write_all(&out).await.is_ok() {
+                                let _ = client_stream.flush().await;
+                                tracing::info!(
+                                    "Push notification for scripthash {} ({} pending) to {}",
+                                    &notification.scripthash[..notification.scripthash.len().min(16)],
+                                    pending.len(),
+                                    peer_addr
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2186,7 +2240,6 @@ fn handle_broadcast(
         tx_hex: tx_hex_clean.to_string(),
         retained: true,
         affected_scripthashes: scripthashes,
-        defer_input_enrichment: true,
     })
 }
 
