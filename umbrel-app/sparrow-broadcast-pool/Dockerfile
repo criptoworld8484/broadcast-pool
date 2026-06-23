@@ -1,4 +1,5 @@
-# Self-contained build for Umbrel Community Store (context = this directory).
+# Build for ghcr publishing. CI builds with context = repository root
+# (see .github/workflows/umbrel-docker.yml), so all COPY paths are root-relative.
 FROM rust:1.86-bookworm AS builder
 
 WORKDIR /build
@@ -15,7 +16,7 @@ RUN useradd -m -u 1000 app
 
 COPY --from=builder /build/target/release/broadcast-pool /usr/local/bin/broadcast-pool
 COPY src/api/dashboard.html /home/app/dashboard.html
-COPY entrypoint.sh /home/app/entrypoint.sh
+COPY umbrel-app/sparrow-broadcast-pool/entrypoint.sh /home/app/entrypoint.sh
 RUN chmod +x /home/app/entrypoint.sh && chown -R app:app /home/app
 
 USER app
