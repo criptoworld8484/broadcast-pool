@@ -583,14 +583,19 @@ async fn save_config(
 
     let response = config_to_response(&config, network_changed);
     let pool_manager = state.pool_manager.clone();
+
+    // Release the config mutex BEFORE reconnecting: reconnect_indexer_from_config()
+    // locks the same std::sync::Mutex, so calling it while this guard is held
+    // self-deadlocks (non-reentrant) and freezes every task that later needs the
+    // config lock — the whole tokio runtime stalls and Sparrow hangs on broadcast.
+    drop(config);
+    tracing::info!("Config lock dropped");
+
     if indexer_updated {
         if let Err(e) = pool_manager.reconnect_indexer_from_config() {
             tracing::warn!("Could not reconnect indexer after save: {}", e);
         }
     }
-
-    drop(config);
-    tracing::info!("Config lock dropped");
 
     Ok(Json(response))
 }
