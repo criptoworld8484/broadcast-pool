@@ -726,10 +726,28 @@ fn pop_client_line(client_buf: &mut Vec<u8>) -> Option<(Vec<u8>, String)> {
         .unwrap_or(0);
     let (s, e) = line_ranges[pick];
     let line_bytes = client_buf[s..e].to_vec();
-    client_buf.drain(..=e);
+    // Drain ONLY the picked line. When the broadcast is not the first buffered
+    // line (pick > 0), `drain(..=e)` would discard every preceding RPC line
+    // unprocessed — Sparrow then never gets responses for those requests. This
+    // only surfaced behind Umbrel's docker-proxy, which coalesces multiple
+    // Sparrow RPC lines into a single read; on a direct LAN connection each
+    // line arrived in its own read so pick was always 0.
+    client_buf.drain(s..=e);
     let line_str = String::from_utf8_lossy(&line_bytes)
         .trim_end_matches('\r')
         .to_string();
+    // Debug: log unique RPC methods seen
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line_str) {
+        let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("?");
+        if method != "blockchain.scripthash.subscribe"
+            && method != "blockchain.estimatefee"
+            && method != "mempool.get_fee_histogram"
+            && method != "server.ping"
+            && method != "blockchain.scripthash.get_history"
+        {
+            tracing::info!("RAW RPC method={} len={}", method, line_str.len());
+        }
+    }
     Some((line_bytes, line_str))
 }
 
@@ -967,20 +985,28 @@ fn pending_txids_for_scripthash_with_session(
 ) -> Vec<String> {
     if let Some(session) = session {
         if let Some(ref txid) = session.recent_broadcast_txid {
-            // Sparrow polls INPUT scripthashes right after ack — always include pending broadcast.
-            let mut pending = vec![txid.clone()];
-            for t in pool_manager.get_pending_txids_for_scripthash(scripthash) {
-                if !pending.iter().any(|p| p == &t) {
-                    pending.push(t);
+            // Only include recent_broadcast_txid if it's still in the virtual mempool.
+            // Once broadcast to Bitcoin Core and removed, Sparrow sees the real state.
+            if pool_manager.has_pending_tx(txid) {
+                let mut pending = vec![txid.clone()];
+                for t in pool_manager.get_pending_txids_for_scripthash(scripthash) {
+                    if !pending.iter().any(|p| p == &t) {
+                        pending.push(t);
+                    }
                 }
+                tracing::info!(
+                    "Session broadcast poll {} → tx {} ({} total)",
+                    &scripthash[..scripthash.len().min(16)],
+                    &txid[..txid.len().min(16)],
+                    pending.len()
+                );
+                return pending;
+            } else {
+                tracing::info!(
+                    "Skipping stale recent_broadcast_txid {} (no longer in virtual mempool)",
+                    &txid[..txid.len().min(16)]
+                );
             }
-            tracing::info!(
-                "Session broadcast poll {} → tx {} ({} total)",
-                &scripthash[..scripthash.len().min(16)],
-                &txid[..txid.len().min(16)],
-                pending.len()
-            );
-            return pending;
         }
     }
     pending_txids_for_scripthash(pool_manager, scripthash)
@@ -1569,6 +1595,7 @@ fn set_tcp_keepalive(stream: &std::net::TcpStream) {
         .with_time(std::time::Duration::from_secs(60))
         .with_interval(std::time::Duration::from_secs(10));
     let _ = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive);
+    let _ = stream.set_nodelay(true);
 }
 
 fn run_electrum_accept_thread(
@@ -1906,6 +1933,8 @@ async fn handle_connection(
     let mut session = SessionState::new();
     let mut scripthash_rx = pool_manager.subscribe_scripthash_changes();
 
+    client_stream.set_nodelay(true)?;
+
     loop {
         tokio::select! {
             result = client_stream.read_buf(&mut client_buf) => {
@@ -1946,6 +1975,16 @@ async fn handle_connection(
                 }
             }
             Ok(notification) = scripthash_rx.recv() => {
+                // Clear stale recent_broadcast_txid if the tx was already broadcast.
+                if let Some(ref txid) = session.recent_broadcast_txid {
+                    if !pool_manager.has_pending_tx(txid) {
+                        tracing::info!(
+                            "Clearing stale recent_broadcast_txid {} (broadcast to network)",
+                            &txid[..txid.len().min(16)]
+                        );
+                        session.recent_broadcast_txid = None;
+                    }
+                }
                 if session.subscribed_scripthashes.contains(&notification.scripthash) {
                     let indexer_url = resolve_live_indexer_url(&pool_manager, &config);
                     let pending = pending_txids_for_scripthash_with_session(
@@ -1954,24 +1993,39 @@ async fn handle_connection(
                         &indexer_url,
                         Some(&session),
                     );
-                    if let Some(hash) = pending::compute_modified_status_hash(vec![], &notification.scripthash, &pending) {
-                        let notification_json = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "blockchain.scripthash.subscribe",
-                            "params": [notification.scripthash, hash]
-                        });
-                        if let Ok(payload) = serde_json::to_vec(&notification_json) {
-                            let mut out = payload;
-                            out.push(b'\n');
-                            if client_stream.write_all(&out).await.is_ok() {
-                                let _ = client_stream.flush().await;
-                                tracing::info!(
-                                    "Push notification for scripthash {} ({} pending) to {}",
-                                    &notification.scripthash[..notification.scripthash.len().min(16)],
-                                    pending.len(),
-                                    peer_addr
-                                );
-                            }
+                    // Always send notification — even with empty pending list — so Sparrow
+                    // learns the tx left the virtual mempool (status hash changes).
+                    let hash = if pending.is_empty() {
+                        // Empty status hash = no unconfirmed txs for this scripthash.
+                        String::new()
+                    } else {
+                        pending::compute_modified_status_hash(vec![], &notification.scripthash, &pending)
+                            .unwrap_or_default()
+                    };
+                    // Always send notification — even with empty pending list — so Sparrow
+                    // learns the tx left the virtual mempool (status hash changes).
+                    let status_value = if pending.is_empty() {
+                        // Empty string = no unconfirmed txs. Sparrow must re-query.
+                        serde_json::Value::String(String::new())
+                    } else {
+                        serde_json::Value::String(hash)
+                    };
+                    let notification_json = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "blockchain.scripthash.subscribe",
+                        "params": [notification.scripthash, status_value]
+                    });
+                    if let Ok(payload) = serde_json::to_vec(&notification_json) {
+                        let mut out = payload;
+                        out.push(b'\n');
+                        if client_stream.write_all(&out).await.is_ok() {
+                            let _ = client_stream.flush().await;
+                            tracing::info!(
+                                "Push notification for scripthash {} ({} pending) to {}",
+                                &notification.scripthash[..notification.scripthash.len().min(16)],
+                                pending.len(),
+                                peer_addr
+                            );
                         }
                     }
                 }
@@ -2355,6 +2409,34 @@ mod tests {
         assert_eq!(
             parse_headers_subscribe_result(&ok),
             Some((100, "deadbeef".to_string()))
+        );
+    }
+
+    #[test]
+    fn pop_client_line_preserves_lines_before_broadcast() {
+        // Through Umbrel's docker-proxy, Sparrow's RPC lines coalesce into one read:
+        // a scripthash.subscribe arrives in the same buffer as the broadcast.
+        let subscribe = r#"{"jsonrpc":"2.0","method":"blockchain.scripthash.subscribe","params":["aa"],"id":1}"#;
+        let broadcast = format!(
+            r#"{{"jsonrpc":"2.0","method":"blockchain.transaction.broadcast","params":["{}"],"id":2}}"#,
+            SAMPLE_TX
+        );
+        let mut buf = Vec::new();
+        buf.extend_from_slice(subscribe.as_bytes());
+        buf.push(b'\n');
+        buf.extend_from_slice(broadcast.as_bytes());
+        buf.push(b'\n');
+
+        // First pop prioritizes the broadcast line (intended behavior).
+        let (_, first) = pop_client_line(&mut buf).expect("broadcast popped first");
+        assert!(line_looks_like_broadcast(&first), "broadcast should be served first");
+
+        // Second pop MUST still return the subscribe line — it must not be discarded.
+        let (_, second) = pop_client_line(&mut buf).expect("subscribe line must survive");
+        assert!(
+            second.contains("blockchain.scripthash.subscribe"),
+            "preceding subscribe line was dropped: {:?}",
+            second
         );
     }
 
