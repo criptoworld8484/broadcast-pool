@@ -431,6 +431,15 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Start { foreground: _ } => {
             tracing::info!("Starting broadcast-pool daemon (network: {:?})", config.network.network_type);
+            if matches!(config.network.network_type, crate::config::NetworkType::Mainnet) {
+                tracing::warn!(
+                    "⚠️  MAINNET — transactions carry REAL value. Broadcast Pool retains signed \
+                     txs in a virtual mempool and does NOT relay them to the network until the \
+                     scheduler or a manual trigger fires: a tx shown as pending in your wallet has \
+                     NOT been broadcast yet. Keep the data volume persistent, retain the signed tx \
+                     hex as a recovery path, and test on testnet4/signet first."
+                );
+            }
 
             let broadcaster = Broadcaster::new(rpc.clone(), indexer.clone(), db.clone(), config.clone());
             let broadcaster_for_test = broadcaster.clone();
@@ -580,9 +589,8 @@ async fn main() -> Result<()> {
                 )?;
                 new_txs.push(new_tx);
             } else if let Some(file_path) = file {
-                new_txs = SparrowImporter::import_signed_tx_from_json(&file_path)?;
+                new_txs = SparrowImporter::import_signed_tx_from_json(&file_path, network_str)?;
                 for tx in &mut new_txs {
-                    tx.network = network_str.to_string();
                     if let Some(ref l) = label {
                         tx.source_label = Some(l.clone());
                     }

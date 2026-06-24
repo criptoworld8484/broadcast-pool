@@ -74,7 +74,7 @@ impl SparrowImporter {
         Ok(result)
     }
 
-    pub fn import_signed_tx_from_json(file_path: &Path) -> Result<Vec<NewBroadcastTx>> {
+    pub fn import_signed_tx_from_json(file_path: &Path, network: &str) -> Result<Vec<NewBroadcastTx>> {
         let content = std::fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
 
@@ -85,7 +85,7 @@ impl SparrowImporter {
                 if let Some(hex) = tx.hex {
                     result.push(NewBroadcastTx {
                         tx_hex: hex,
-                        network: "signet".to_string(),
+                        network: network.to_string(),
                         nlocktime: None,
                         broadcast_mode: None,
                         scheduled_time: None,
@@ -113,7 +113,7 @@ impl SparrowImporter {
         if let Some(hex) = tx.hex {
             Ok(vec![NewBroadcastTx {
                 tx_hex: hex,
-                network: "signet".to_string(),
+                network: network.to_string(),
                 nlocktime: None,
                 broadcast_mode: None,
                 scheduled_time: None,
