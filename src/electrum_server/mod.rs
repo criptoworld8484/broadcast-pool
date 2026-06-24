@@ -601,7 +601,12 @@ fn local_electrum_response(
             let genesis = config
                 .lock()
                 .ok()
-                .map(|c| c.network.network_type.genesis_hash().to_string())
+                .map(|c| {
+                    c.network
+                        .resolved_genesis
+                        .clone()
+                        .unwrap_or_else(|| c.network.network_type.genesis_hash().to_string())
+                })
                 .unwrap_or_else(|| "0".repeat(64));
             Some(serde_json::json!({
                 "jsonrpc": "2.0",

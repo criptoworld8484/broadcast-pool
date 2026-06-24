@@ -407,6 +407,16 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Resolve the chain's real genesis once (queries Bitcoin Core; handles custom
+    // signets and corrects the built-in constants). server.features reports this so
+    // wallets like Liana that validate genesis at setup don't fail with a mismatch.
+    config.network.resolved_genesis =
+        Some(discovery::expected_genesis_hash(&config.network.network_type));
+    tracing::info!(
+        "Resolved genesis hash: {}",
+        config.network.resolved_genesis.as_deref().unwrap_or("?")
+    );
+
     let shared_config = Arc::new(std::sync::Mutex::new(config.clone()));
 
     let pool_manager = Arc::new(PoolManager::new(db.clone(), rpc.clone(), indexer.clone(), shared_config.clone()));

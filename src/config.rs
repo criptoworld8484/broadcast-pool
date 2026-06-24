@@ -194,6 +194,7 @@ impl Config {
         Self {
             network: NetworkConfig {
                 network_type,
+                resolved_genesis: None,
             },
             bitcoin_rpc: std::env::var("BROADCAST_POOL_RPC_URL").ok().map(|url| {
                 BitcoinRpcConfig {
@@ -256,6 +257,10 @@ impl Config {
 pub struct NetworkConfig {
     #[serde(rename = "type")]
     pub network_type: NetworkType,
+    /// Real genesis hash of the connected node, resolved at startup (handles custom
+    /// signets and corrects the built-in fallback constants). Not persisted.
+    #[serde(skip)]
+    pub resolved_genesis: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
@@ -295,10 +300,10 @@ impl NetworkType {
                 "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
             }
             NetworkType::Testnet4 => {
-                "000000000933ea01ad0ee984209779baaec3ced90fa537f92f5ac0adcf472867"
+                "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043"
             }
             NetworkType::Signet => {
-                "00000008819873e925632181568121be59ecd5df7a9c348375d874564ae96f681"
+                "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
             }
         }
     }
@@ -404,5 +409,32 @@ impl Default for WebConfig {
             host: "127.0.0.1".to_string(),
             port: 8080,
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::NetworkType;
+
+    // The signet/testnet4 constants were previously wrong (signet had 65 chars; testnet4
+    // held testnet3's hash), which broke Liana's genesis check. Guard all networks.
+    #[test]
+    fn genesis_hashes_are_valid_and_correct() {
+        for nt in [NetworkType::Mainnet, NetworkType::Testnet4, NetworkType::Signet] {
+            let g = nt.genesis_hash();
+            assert_eq!(g.len(), 64, "{:?} genesis must be 64 hex chars", nt);
+            assert!(hex::decode(g).is_ok(), "{:?} genesis must be valid hex", nt);
+        }
+        assert_eq!(
+            NetworkType::Mainnet.genesis_hash(),
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+        );
+        assert_eq!(
+            NetworkType::Signet.genesis_hash(),
+            "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
+        );
+        assert_eq!(
+            NetworkType::Testnet4.genesis_hash(),
+            "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043"
+        );
     }
 }
