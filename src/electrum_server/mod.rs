@@ -980,35 +980,18 @@ fn pending_txids_for_scripthash(
 fn pending_txids_for_scripthash_with_session(
     pool_manager: &PoolManager,
     scripthash: &str,
-    indexer_url: &str,
-    session: Option<&SessionState>,
+    _indexer_url: &str,
+    _session: Option<&SessionState>,
 ) -> Vec<String> {
-    if let Some(session) = session {
-        if let Some(ref txid) = session.recent_broadcast_txid {
-            // Only include recent_broadcast_txid if it's still in the virtual mempool.
-            // Once broadcast to Bitcoin Core and removed, Sparrow sees the real state.
-            if pool_manager.has_pending_tx(txid) {
-                let mut pending = vec![txid.clone()];
-                for t in pool_manager.get_pending_txids_for_scripthash(scripthash) {
-                    if !pending.iter().any(|p| p == &t) {
-                        pending.push(t);
-                    }
-                }
-                tracing::info!(
-                    "Session broadcast poll {} → tx {} ({} total)",
-                    &scripthash[..scripthash.len().min(16)],
-                    &txid[..txid.len().min(16)],
-                    pending.len()
-                );
-                return pending;
-            } else {
-                tracing::info!(
-                    "Skipping stale recent_broadcast_txid {} (no longer in virtual mempool)",
-                    &txid[..txid.len().min(16)]
-                );
-            }
-        }
-    }
+    // Inject the pending tx ONLY into the scripthashes it actually affects (its real
+    // inputs/outputs). The previous `recent_broadcast_txid` session shortcut added the
+    // broadcast txid to EVERY scripthash queried after a broadcast, so Sparrow saw its
+    // outgoing tx attached to dozens of unrelated wallet addresses and could never
+    // reconcile it against the real tx → stuck on "broadcasting" forever.
+    //
+    // Output scripthashes are visible here immediately (stored pre-ack); input/spending
+    // scripthashes appear once background enrichment merges them — which also emits a
+    // subscription push so Sparrow re-queries and sees the tx on its spending addresses.
     pending_txids_for_scripthash(pool_manager, scripthash)
 }
 
