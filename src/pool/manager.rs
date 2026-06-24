@@ -1019,26 +1019,41 @@ impl PoolManager {
         if extra.is_empty() {
             return;
         }
-        let mut pending = match self.lock_pending() {
-            Some(p) => p,
-            None => return,
-        };
-        let Some(info) = pending.get_mut(txid) else {
-            return;
-        };
-        let before = info.scripthashes.len();
-        for sh in extra {
-            if !info.scripthashes.contains(sh) {
-                info.scripthashes.push(sh.clone());
+        let newly_added: Vec<String> = {
+            let mut pending = match self.lock_pending() {
+                Some(p) => p,
+                None => return,
+            };
+            let Some(info) = pending.get_mut(txid) else {
+                return;
+            };
+            let before = info.scripthashes.len();
+            let mut added = Vec::new();
+            for sh in extra {
+                if !info.scripthashes.contains(sh) {
+                    info.scripthashes.push(sh.clone());
+                    added.push(sh.clone());
+                }
             }
-        }
-        if info.scripthashes.len() > before {
-            tracing::info!(
-                "Enriched pending tx {} scripthashes: {} → {}",
-                txid,
-                before,
-                info.scripthashes.len()
-            );
+            if info.scripthashes.len() > before {
+                tracing::info!(
+                    "Enriched pending tx {} scripthashes: {} → {}",
+                    txid,
+                    before,
+                    info.scripthashes.len()
+                );
+            }
+            added
+        };
+        // Notify connected Electrum sessions about the newly affected scripthashes.
+        // Input/spending addresses are resolved AFTER the pre-ack output-only store;
+        // without this push, Sparrow (subscribed to its spending addresses) never sees
+        // the tx hit those addresses and stays stuck on "broadcasting" forever.
+        // Sent after dropping the pending lock (mirrors store_pending_tx).
+        for sh in &newly_added {
+            let _ = self.scripthash_notifications.send(ScripthashNotification {
+                scripthash: sh.clone(),
+            });
         }
     }
 
@@ -1224,5 +1239,52 @@ fn classify_mempool_congestion(fee_sat_vb: f64, network: &str) -> &'static str {
         "medium"
     } else {
         "high"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::db::Database;
+
+    fn test_manager() -> (PoolManager, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(Database::open(&dir.path().join("test.db")).expect("db open"));
+        let config = Arc::new(Mutex::new(Config::default_config()));
+        (PoolManager::new(db, None, None, config), dir)
+    }
+
+    // After the pre-ack output-only store, input (spending) scripthashes are resolved
+    // later and merged in. Those merged scripthashes MUST emit a subscription push, or
+    // Sparrow never learns the tx hit its spending addresses and hangs on "broadcasting".
+    #[test]
+    fn merge_pending_scripthashes_pushes_new_scripthashes() {
+        let (pm, _dir) = test_manager();
+        let txid = "a2885907c946130f23ab0fe0d885e4b6276e4f0cd8b15c4b2c04183eeb57d86d";
+        let out_sh = "4a6fb09fc2adc3be000000000000000000000000000000000000000000000001";
+        pm.store_pending_tx(txid, "00", vec![out_sh.to_string()], vec![]);
+
+        // Subscribe AFTER the output store so we only observe the enrichment push.
+        let mut rx = pm.subscribe_scripthash_changes();
+        let input_sh = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0";
+        pm.merge_pending_scripthashes(txid, &[input_sh.to_string()]);
+
+        let got = rx.try_recv().expect("push for newly merged input scripthash");
+        assert_eq!(got.scripthash, input_sh);
+    }
+
+    // Re-merging an already-known scripthash must NOT spam a push (nothing new added).
+    #[test]
+    fn merge_pending_scripthashes_no_push_when_nothing_new() {
+        let (pm, _dir) = test_manager();
+        let txid = "b1885907c946130f23ab0fe0d885e4b6276e4f0cd8b15c4b2c04183eeb57d86d";
+        let sh = "1111111111111111111111111111111111111111111111111111111111111111";
+        pm.store_pending_tx(txid, "00", vec![sh.to_string()], vec![]);
+
+        let mut rx = pm.subscribe_scripthash_changes();
+        pm.merge_pending_scripthashes(txid, &[sh.to_string()]); // already present
+
+        assert!(rx.try_recv().is_err(), "no push expected when no new scripthash");
     }
 }
