@@ -3,7 +3,7 @@ import {
   alertInstall,
   alertStart,
   bitcoindDescription,
-  electrsDescription,
+  fulcrumDescription,
   long,
   short,
 } from './i18n'
@@ -49,12 +49,12 @@ export const manifest = setupManifest({
         icon: 'https://raw.githubusercontent.com/Start9Labs/bitcoin-core-startos/refs/heads/30.x/dep-icon.svg',
       },
     },
-    electrs: {
-      description: electrsDescription,
+    fulcrum: {
+      description: fulcrumDescription,
       optional: false,
       metadata: {
-        title: 'Electrs',
-        icon: 'https://raw.githubusercontent.com/Start9Labs/electrs-startos/refs/heads/master/icon.svg',
+        title: 'Fulcrum',
+        icon: 'https://raw.githubusercontent.com/Start9Labs/fulcrum-startos/refs/heads/master/icon.png',
       },
     },
   },

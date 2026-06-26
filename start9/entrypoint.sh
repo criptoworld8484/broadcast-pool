@@ -13,8 +13,11 @@ set -eu
 
 DATA_DIR="${BROADCAST_POOL_DATA_DIR:-/data}"
 BITCOIN_DATA_DIR="${BITCOIN_DATA_DIR:-/mnt/bitcoind}"
+# StartOS normalizes the Bitcoin Core RPC port to 8332 on every network (verified:
+# bitcoin.conf has "[testnet4] rpcbind=0.0.0.0:8332"), so this default is correct for
+# mainnet/testnet4/signet. The indexer is Fulcrum (Electrum TCP on 50001).
 BITCOIN_RPC_URL="${BROADCAST_POOL_RPC_URL:-http://bitcoind.startos:8332}"
-ELECTRS_URL="${BROADCAST_POOL_INDEXER_URL:-tcp://electrs.startos:50001}"
+ELECTRS_URL="${BROADCAST_POOL_INDEXER_URL:-tcp://fulcrum.startos:50001}"
 
 BOOT_LOG="${DATA_DIR}/startos-boot.log"
 mkdir -p "${DATA_DIR}"
