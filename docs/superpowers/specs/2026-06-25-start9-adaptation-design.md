@@ -19,6 +19,10 @@ es **agnóstico de distro**: su superficie de integración es su contrato de var
 **Decisiones tomadas (brainstorming):**
 - Mismo repo, **rama aislada** `start9-adaptation`, todo bajo `start9/` (no toca archivos Umbrel).
 - Nodo de pruebas Start9 disponible con acceso SSH/web, indexador **electrs**, red **mainnet**.
+- **Multi-red (testnet4, signet, mainnet) con la red autodetectada desde el nodo Bitcoin.** El
+  binario ya lo hace: `discovery::apply_network_from_rpc` (incondicional) mapea
+  `getblockchaininfo.chain` → red. El `entrypoint.sh` **no** fija `BROADCAST_POOL_NETWORK`.
+  (Se corrigió el orden en `src/main.rs`: detectar red ANTES de abrir la DB, que es por-red.)
 - Verificación = **pruebas de humo seguras** (conexión, genesis, handshake, dashboard, que
   Sparrow/Liana conecten). **NO** se difundirá una tx de valor real.
 
@@ -66,6 +70,7 @@ Estructura TS SDK (como frigate):
 | `BROADCAST_POOL_ELECTRUM_HOST`    | `0.0.0.0`                                           |
 | `BROADCAST_POOL_ELECTRUM_PORT`    | `50050`                                            |
 | `BROADCAST_POOL_WEB_HOST`/`PORT`  | `0.0.0.0` / `8080`                                 |
+| `BROADCAST_POOL_NETWORK`          | **no se define** — autodetectada por RPC           |
 | `BROADCAST_POOL_UMBREL`           | **no se define** (modo genérico)                   |
 
 El cookie de bitcoind se resuelve igual que frigate (`/mnt/bitcoind/.cookie`, con fallback a
@@ -96,7 +101,7 @@ empaquetado no añade lógica Rust nueva salvo el posible ajuste de INDEXER_URL,
 ## Alcance / YAGNI
 - v1 expone **un** puerto Electrum (50050) para Sparrow y Liana; el `liana_port` separado
   (PoC de altura/anti-fee-sniping) **no** se expone en v1.
-- Solo red **mainnet** (es la del nodo Start9); el binario soporta otras redes si se cambia el env.
+- **Multi-red por autodetección RPC** (testnet4/signet/mainnet); sin selector manual en la UI.
 - Sin acciones/actions extra más allá de las de plumbing en v1.
 
 ## Riesgos
