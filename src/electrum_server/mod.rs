@@ -105,7 +105,7 @@ fn forward_to_indexer_sync(request_str: &str, indexer_addr: &str) -> Option<Stri
         .to_string();
 
     let tcp_stream = match std::net::TcpStream::connect_timeout(
-        &addr.parse().ok()?,
+        &crate::rpc::indexer_transport::resolve_socket_addr(&addr).ok()?,
         std::time::Duration::from_secs(3),
     ) {
         Ok(s) => s,

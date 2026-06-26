@@ -127,11 +127,24 @@ fn connect_timeout_secs() -> u64 {
     }
 }
 
+/// Resolve a `host:port` string (hostname OR literal IP) to a SocketAddr.
+///
+/// `str::parse::<SocketAddr>()` only accepts numeric IPs, so it works for Umbrel
+/// (IP indexer like 10.21.21.10) but fails for hostname-based indexers such as
+/// StartOS `fulcrum.startos:50001`. Use DNS resolution so both work.
+pub fn resolve_socket_addr(addr: &str) -> Result<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    addr.to_socket_addrs()
+        .with_context(|| format!("Could not resolve indexer address ({})", addr))?
+        .next()
+        .with_context(|| format!("No address resolved for indexer ({})", addr))
+}
+
 fn connect_stream(url: &str) -> Result<TransportStream> {
     let use_ssl = url.starts_with("ssl://");
     let addr = strip_scheme(url);
     let tcp = TcpStream::connect_timeout(
-        &addr.parse().context("Invalid indexer address")?,
+        &resolve_socket_addr(addr)?,
         Duration::from_secs(connect_timeout_secs()),
     )
     .with_context(|| format!("TCP connect failed ({})", addr))?;
@@ -219,4 +232,31 @@ pub fn probe_working_url(candidates: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_socket_addr;
+
+    // resolve_socket_addr must accept both literal IPs (Umbrel) and hostnames
+    // (StartOS fulcrum.startos). The previous str::parse::<SocketAddr> only handled IPs.
+    #[test]
+    fn resolves_literal_ip() {
+        let a = resolve_socket_addr("127.0.0.1:50001").expect("literal ip");
+        assert_eq!(a.port(), 50001);
+        assert!(a.ip().is_loopback());
+    }
+
+    #[test]
+    fn resolves_localhost_hostname() {
+        // `localhost` is the portable hostname guaranteed to resolve in CI.
+        let a = resolve_socket_addr("localhost:50001").expect("hostname resolves");
+        assert_eq!(a.port(), 50001);
+    }
+
+    #[test]
+    fn literal_socketaddr_parse_rejects_hostname() {
+        // Documents the original bug: SocketAddr::parse cannot handle hostnames.
+        assert!("localhost:50001".parse::<std::net::SocketAddr>().is_err());
+    }
 }

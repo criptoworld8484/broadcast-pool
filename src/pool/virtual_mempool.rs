@@ -217,7 +217,7 @@ fn fetch_prev_tx(txid_str: &str, indexer_addr: &str) -> Result<Transaction> {
     let addr = strip_indexer_host(indexer_addr);
 
     let mut stream = std::net::TcpStream::connect_timeout(
-        &addr.parse().context("Invalid indexer address")?,
+        &crate::rpc::indexer_transport::resolve_socket_addr(&addr)?,
         std::time::Duration::from_secs(5),
     )
     .context("Failed to connect to indexer")?;
