@@ -22,14 +22,14 @@ export const manifest = setupManifest({
     'broadcast-pool': {
       source: {
         dockerBuild: {
-          // The Rust binary is built from the repository root (Cargo.toml, src/),
-          // which lives one level above this StartOS package dir (start9/). So the
-          // build context is the repo root and the Dockerfile path is relative to it.
-          dockerfile: 'start9/Dockerfile',
-          workdir: '..',
+          // Build context is this package dir (start9/). The Dockerfile bases off the
+          // already-published binary image, so no Rust source is needed in the context.
+          dockerfile: 'Dockerfile',
+          workdir: '.',
         },
       },
-      arch: ['x86_64', 'aarch64'],
+      // x86_64 only for now: the base binary image is linux/amd64. aarch64 is a follow-up.
+      arch: ['x86_64'],
     },
   },
   alerts: {
