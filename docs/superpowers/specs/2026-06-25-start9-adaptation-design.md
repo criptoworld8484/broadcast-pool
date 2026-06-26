@@ -54,7 +54,11 @@ Estructura TS SDK (como frigate):
   daemon `entrypoint.sh`, health-check `checkPortListening(50050)`.
 - `start9/startos/utils.ts` — constantes de puerto (`electrumPort=50050`, `webPort=8080`).
 - `start9/startos/{index,versions/current,init,backups,actions,sdk,i18n}.ts` — plumbing estándar.
-- `start9/Dockerfile` — build multi-stage del binario Rust (context = raíz del repo), arch x86_64+aarch64.
+- `start9/Dockerfile` — **base de la imagen ya publicada** `broadcast-pool-umbrel:0.3.11` (que ya
+  contiene el binario + dashboard) + overlay del entrypoint/env de StartOS. Decisión: el contexto de
+  build del s9pk es el dir del paquete (`start9/`), que no contiene el crate Rust; empaquetar desde un
+  artefacto preconstruido es lo idiomático en StartOS (frigate descarga un binario). **v1 es x86_64**
+  (la imagen base es linux/amd64); aarch64 queda como follow-up (imagen multi-arch o binarios de release).
 - `start9/entrypoint.sh` — traduce StartOS → env vars del binario (ver mapeo).
 - `start9/{Makefile,s9pk.mk,package.json,tsconfig.json}` + `.github/workflows/build-s9pk.yml`.
 
