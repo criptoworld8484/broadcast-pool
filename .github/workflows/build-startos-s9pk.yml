@@ -71,6 +71,9 @@ jobs:
           test $(stat -c%s icon.png) -le 40960
           npm install
           npm run check
+          # Build the ncc bundle (javascript/index.js) BEFORE packing: start-cli
+          # s9pk pack/list-ingredients needs it to exist.
+          npm run build
           if [ -n "$DEV_KEY" ]; then
             mkdir -p "$HOME/.startos"
             printf '%s' "$DEV_KEY" > "$HOME/.startos/developer.key.pem"
