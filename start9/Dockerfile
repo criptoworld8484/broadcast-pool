@@ -19,7 +19,8 @@ ENV BROADCAST_POOL_DATA_DIR=/data
 ENV BROADCAST_POOL_ELECTRUM_PORT=50050
 ENV BROADCAST_POOL_WEB_PORT=8080
 
-# Run as the unprivileged uid baked into the base image (matches the StartOS convention).
-USER app
+# StartOS runs service subcontainers as root and mounts /data owned by root, so run
+# as root (the base image's trailing `USER app` would hit EPERM writing to /data).
+USER root
 
 ENTRYPOINT ["/entrypoint.sh"]
