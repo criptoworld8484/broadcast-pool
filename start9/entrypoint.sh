@@ -77,6 +77,9 @@ export BROADCAST_POOL_ELECTRUM_HOST="${BROADCAST_POOL_ELECTRUM_HOST:-0.0.0.0}"
 export BROADCAST_POOL_ELECTRUM_PORT="${BROADCAST_POOL_ELECTRUM_PORT:-50050}"
 export BROADCAST_POOL_WEB_HOST="${BROADCAST_POOL_WEB_HOST:-0.0.0.0}"
 export BROADCAST_POOL_WEB_PORT="${BROADCAST_POOL_WEB_PORT:-8080}"
+# Platform hint: the dashboard can't auto-detect a LAN IP here (the container only sees
+# the StartOS overlay), so it directs the user to the service's Interfaces page instead.
+export BROADCAST_POOL_PLATFORM="startos"
 # Deliberately NOT set: BROADCAST_POOL_NETWORK (auto-detected), BROADCAST_POOL_UMBREL.
 
 log "Starting broadcast-pool (network auto-detected from Bitcoin Core)"
