@@ -111,7 +111,9 @@ pub fn is_startos_mode() -> bool {
 pub fn resolve_lan_host(config: &Config) -> Option<String> {
     if let Some(ref h) = config.electrum_server.lan_connect_host {
         let h = h.trim();
-        if !h.is_empty() {
+        // Ignore a stale container/overlay IP persisted by an earlier version (e.g. the
+        // StartOS overlay 10.0.3.x) — it is not reachable by wallets on the LAN.
+        if !h.is_empty() && !is_likely_docker_bridge(h) {
             return Some(h.to_string());
         }
     }
