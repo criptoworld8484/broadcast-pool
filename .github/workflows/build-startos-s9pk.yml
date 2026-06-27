@@ -1,0 +1,107 @@
+name: Build StartOS s9pk
+
+# Isolated from the Umbrel image workflow (which triggers on v* tags). This one
+# builds the StartOS .s9pk from the start9/ package directory.
+on:
+  workflow_dispatch:
+  push:
+    branches: [start9-adaptation]
+    tags:
+      - 'startos-v*'
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: start9
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install system dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            squashfs-tools-ng \
+            qemu-user-static \
+            jq
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-docker-action@v5
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Install start-cli
+        run: |
+          ARCH=$(uname -m)
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ASSET_NAME="start-cli_${ARCH}-${OS}"
+          DOWNLOAD_URL=$(curl -fsS \
+            -H "Authorization: token ${{ github.token }}" \
+            https://api.github.com/repos/Start9Labs/start-os/releases \
+            | jq -r '[.[].assets[] | select(.name=="'"$ASSET_NAME"'")] | first | .browser_download_url')
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "Error: Could not find asset '$ASSET_NAME' in Start9Labs/start-os releases"
+            exit 1
+          fi
+          curl -fsSL \
+            -H "Authorization: token ${{ github.token }}" \
+            -H "Accept: application/octet-stream" \
+            "$DOWNLOAD_URL" -o /tmp/start-cli
+          sudo install -m 755 /tmp/start-cli /usr/local/bin/start-cli
+          start-cli --version
+
+      - name: Build s9pk (${{ matrix.arch }})
+        env:
+          DEV_KEY: ${{ secrets.DEV_KEY }}
+        run: |
+          test -f icon.png
+          test $(stat -c%s icon.png) -le 40960
+          npm install
+          npm run check
+          # Build the ncc bundle (javascript/index.js) BEFORE packing: start-cli
+          # s9pk pack/list-ingredients needs it to exist.
+          npm run build
+          if [ -n "$DEV_KEY" ]; then
+            mkdir -p "$HOME/.startos"
+            printf '%s' "$DEV_KEY" > "$HOME/.startos/developer.key.pem"
+          else
+            start-cli init-key
+          fi
+          make arch/${{ matrix.arch }}
+          sha256sum broadcast-pool_${{ matrix.arch }}.s9pk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: broadcast-pool_${{ matrix.arch }}.s9pk
+          path: start9/broadcast-pool_${{ matrix.arch }}.s9pk
+          compression-level: 0
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/startos-v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: broadcast-pool_*
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            broadcast-pool_x86_64.s9pk
+          generate_release_notes: true

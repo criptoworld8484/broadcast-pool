@@ -338,13 +338,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    let data_dir = get_data_dir(&config)?;
-    std::fs::create_dir_all(&data_dir)?;
-
-    let db_path = config.db_path(&data_dir);
-    let db = Arc::new(Database::open(&db_path)?);
-
-    // RPC is only created when needed (lazy init)
+    // RPC is only created when needed (lazy init). Built BEFORE deriving the data dir / DB
+    // so network auto-detection can correct config.network first: both the data dir and the
+    // DB filename are network-specific, so detecting the network AFTER opening the DB would
+    // bind the wrong network. This matters when BROADCAST_POOL_NETWORK is unset and we rely
+    // purely on auto-detection (e.g. StartOS), where the config default is testnet4.
     let rpc_needed = matches!(
         &cli.command,
         Commands::Start { .. } | Commands::TestRpc | Commands::BroadcastAll { .. }
@@ -365,8 +363,14 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Auto-detect network (Bitcoin RPC), indexer (50001/50002), and LAN IP for wallet URL.
+    // Auto-detect network from Bitcoin Core BEFORE deriving the network-specific data dir and DB.
     discovery::apply_network_from_rpc(&mut config, rpc.as_deref());
+
+    let data_dir = get_data_dir(&config)?;
+    std::fs::create_dir_all(&data_dir)?;
+
+    let db_path = config.db_path(&data_dir);
+    let db = Arc::new(Database::open(&db_path)?);
     let indexer_before = config.indexer.clone();
     let indexer_found = if discovery::is_umbrel_mode() {
         discovery::heal_umbrel_indexer_config(&mut config);

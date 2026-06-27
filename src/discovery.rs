@@ -64,7 +64,7 @@ pub fn detect_lan_ip() -> Option<String> {
     {
         if out.status.success() {
             let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if is_plausible_lan_ip(&ip) {
+            if is_plausible_lan_ip(&ip) && !is_likely_docker_bridge(&ip) {
                 return Some(ip);
             }
         }
@@ -88,15 +88,32 @@ fn is_plausible_lan_ip(ip: &str) -> bool {
     !ip.starts_with("127.") && !ip.starts_with("0.") && ip.contains('.')
 }
 
-/// Umbrel / Docker internal subnets — not useful for Sparrow on the LAN.
+/// Container/overlay subnets that are NOT reachable by wallets on the physical LAN:
+/// Umbrel Docker (10.21.x), default Docker bridges (172.17/18.x), and the StartOS
+/// service overlay (10.0.3.x). Detecting one of these as the "LAN IP" would show a
+/// useless wallet URL, so they are excluded.
 fn is_likely_docker_bridge(ip: &str) -> bool {
-    ip.starts_with("10.21.") || ip.starts_with("172.17.") || ip.starts_with("172.18.")
+    ip.starts_with("10.21.")
+        || ip.starts_with("172.17.")
+        || ip.starts_with("172.18.")
+        || ip.starts_with("10.0.3.")
+}
+
+/// True when running as a StartOS service. The StartOS entrypoint sets
+/// `BROADCAST_POOL_PLATFORM=startos`. On StartOS the wallet connects via the address
+/// shown in the service's Interfaces page, not an auto-detected container IP.
+pub fn is_startos_mode() -> bool {
+    std::env::var("BROADCAST_POOL_PLATFORM")
+        .map(|v| v.eq_ignore_ascii_case("startos"))
+        .unwrap_or(false)
 }
 
 pub fn resolve_lan_host(config: &Config) -> Option<String> {
     if let Some(ref h) = config.electrum_server.lan_connect_host {
         let h = h.trim();
-        if !h.is_empty() {
+        // Ignore a stale container/overlay IP persisted by an earlier version (e.g. the
+        // StartOS overlay 10.0.3.x) — it is not reachable by wallets on the LAN.
+        if !h.is_empty() && !is_likely_docker_bridge(h) {
             return Some(h.to_string());
         }
     }
@@ -1128,6 +1145,17 @@ pub fn save_config_to_disk(config: &Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Container/overlay IPs must NOT be offered as a wallet LAN IP. The StartOS overlay
+    // (10.0.3.x) was being shown in the dashboard as the (useless) wallet URL.
+    #[test]
+    fn overlay_ips_are_not_lan() {
+        assert!(is_likely_docker_bridge("10.0.3.72"), "StartOS overlay");
+        assert!(is_likely_docker_bridge("10.21.21.10"), "Umbrel docker");
+        assert!(is_likely_docker_bridge("172.17.0.2"), "docker bridge");
+        assert!(!is_likely_docker_bridge("192.168.50.134"), "real LAN");
+        assert!(!is_likely_docker_bridge("10.0.0.5"), "non-overlay private");
+    }
 
     #[test]
     fn maps_bitcoin_chains() {
