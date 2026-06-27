@@ -241,6 +241,35 @@ fn peek_line_methods(line: &str) -> Option<Vec<String>> {
         .map(|m| vec![m.to_string()])
 }
 
+/// Record `server.version` (and its client-name param) on the session. Sparrow always
+/// sends this during its handshake; Liana's electrum-client skips it. The presence/absence
+/// plus the client name let the broadcast path tell the wallets apart on the shared port.
+fn capture_wallet_fingerprint(line: &str, session: &mut SessionState) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return;
+    };
+    let items: Vec<&serde_json::Value> = match v.as_array() {
+        Some(arr) => arr.iter().collect(),
+        None => vec![&v],
+    };
+    for item in items {
+        if item.get("method").and_then(|m| m.as_str()) != Some("server.version") {
+            continue;
+        }
+        session.saw_server_version = true;
+        if let Some(name) = item
+            .get("params")
+            .and_then(|p| p.as_array())
+            .and_then(|a| a.first())
+            .and_then(|n| n.as_str())
+        {
+            if !name.is_empty() {
+                session.wallet_label = Some(name.to_string());
+            }
+        }
+    }
+}
+
 /// Parse broadcast RPC even when strict struct decode would fail.
 /// Supports `[hex]`, `"hex"`, object params, and broadcast_package batches.
 fn params_first_string(params: &serde_json::Value) -> Option<String> {
@@ -352,6 +381,13 @@ struct SessionState {
     /// Last tx acked this session — Sparrow polls input scripthashes before enrichment finishes.
     recent_broadcast_txid: Option<String>,
     rpc_lines_handled: u32,
+    /// Whether this session sent `server.version`. Sparrow always does during its handshake;
+    /// Liana (electrum-client / Rust) skips it. Used to tell the two wallets apart on the
+    /// SHARED Electrum port so Liana's block-height nLockTime txs are ingested as manual
+    /// (schedulable by date/time) instead of by_block.
+    saw_server_version: bool,
+    /// Client name from `server.version` params (e.g. "Sparrow 2.x"), when sent.
+    wallet_label: Option<String>,
 }
 
 impl SessionState {
@@ -364,7 +400,25 @@ impl SessionState {
             broadcast_intercepted: false,
             recent_broadcast_txid: None,
             rpc_lines_handled: 0,
+            saw_server_version: false,
+            wallet_label: None,
         }
+    }
+
+    /// Effective ingest source for a broadcast on this session. On the shared Sparrow
+    /// port, a wallet that never sent `server.version` (or whose client name is Liana)
+    /// is treated as Liana so its tx is ingested as manual/pending.
+    fn effective_source<'a>(&self, listener_label: &'a str) -> &'a str {
+        if listener_label == "sparrow" {
+            let looks_liana = self
+                .wallet_label
+                .as_deref()
+                .is_some_and(|l| l.to_ascii_lowercase().contains("liana"));
+            if looks_liana || !self.saw_server_version {
+                return "liana";
+            }
+        }
+        listener_label
     }
 
     fn log_disconnect_summary(&self, peer_addr: std::net::SocketAddr, source_label: &str) {
@@ -1344,9 +1398,22 @@ async fn intercept_and_handle_broadcast(
     tracing::info!("Broadcast ack sent to wallet (outputs pre-stored), txid={}", preview.txid);
 
     // ── Phase 2: DB insert + input scripthash enrichment in background ──
+    // Attribute the tx to the actual wallet: on the shared Sparrow port, a session that
+    // never sent server.version (or whose client name is Liana) is Liana, so its tx is
+    // ingested as manual/pending (date/time scheduling) instead of by_block.
+    let effective_source = session.effective_source(source_label);
+    if effective_source != source_label {
+        tracing::info!(
+            "Broadcast on '{}' port attributed to '{}' (saw_server_version={}, wallet={:?})",
+            source_label,
+            effective_source,
+            session.saw_server_version,
+            session.wallet_label
+        );
+    }
     let pm = pool_manager.clone();
     let cfg = config.clone();
-    let src = source_label.to_string();
+    let src = effective_source.to_string();
     let hex_owned = hex_param;
     let preview_txid = preview.txid.clone();
 
@@ -1671,6 +1738,10 @@ async fn process_client_line(
     }
 
     session.rpc_lines_handled += 1;
+
+    // Wallet fingerprint: record server.version (and its client name) so a broadcast
+    // later in the session can be attributed to Sparrow vs Liana on the shared port.
+    capture_wallet_fingerprint(line_str, session);
 
     // Handshake RPCs: always answer locally (never block on upstream electrs).
     if let Ok(handshake) = parse_subrequests(line_str) {
@@ -2290,6 +2361,40 @@ mod tests {
     use super::*;
 
     const SAMPLE_TX: &str = "0100000002f327e86da3e66bd20e1129b1fb36d07056f0b9a117199e759396526b8f3a20780000000000fffffffff0ede03d75050f20801d50358829ae02c058e8677d2cc74df51f738285013c260000000000ffffffff02f028d6dc010000001976a914ffb035781c3c69e076d48b60c3d38592e7ce06a788ac00ca9a3b000000001976a914fa5139067622fd7e1e722a05c17c2bb7d5fd6df088ac00000000";
+
+    // On the shared Sparrow port, Liana is identified by the absence of server.version
+    // (or a Liana client name) so its block-height nLockTime tx becomes manual, not by_block.
+    #[test]
+    fn effective_source_detects_liana_on_shared_port() {
+        // Sparrow: sends server.version → stays sparrow.
+        let mut sparrow = SessionState::new();
+        capture_wallet_fingerprint(
+            r#"{"jsonrpc":"2.0","method":"server.version","params":["Sparrow 2.1.0","1.4"],"id":1}"#,
+            &mut sparrow,
+        );
+        assert!(sparrow.saw_server_version);
+        assert_eq!(sparrow.effective_source("sparrow"), "sparrow");
+
+        // Liana: never sends server.version → treated as liana on the sparrow port.
+        let mut liana = SessionState::new();
+        capture_wallet_fingerprint(
+            r#"{"jsonrpc":"2.0","method":"blockchain.block.header","params":[0],"id":1}"#,
+            &mut liana,
+        );
+        assert!(!liana.saw_server_version);
+        assert_eq!(liana.effective_source("sparrow"), "liana");
+
+        // Liana that DOES send a Liana-named server.version → still liana.
+        let mut liana_named = SessionState::new();
+        capture_wallet_fingerprint(
+            r#"{"jsonrpc":"2.0","method":"server.version","params":["Liana","1.4"],"id":1}"#,
+            &mut liana_named,
+        );
+        assert_eq!(liana_named.effective_source("sparrow"), "liana");
+
+        // The dedicated liana listener is always liana regardless of fingerprint.
+        assert_eq!(sparrow.effective_source("liana"), "liana");
+    }
 
     #[test]
     fn extract_broadcast_hex_array_params() {
