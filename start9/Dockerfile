@@ -17,7 +17,10 @@ COPY --chmod=0755 entrypoint.sh /entrypoint.sh
 # StartOS data volume + auto-detected network (do NOT pin BROADCAST_POOL_NETWORK).
 ENV BROADCAST_POOL_DATA_DIR=/data
 ENV BROADCAST_POOL_ELECTRUM_PORT=50050
+ENV BROADCAST_POOL_LIANA_ELECTRUM_PORT=50051
 ENV BROADCAST_POOL_WEB_PORT=8080
+
+EXPOSE 50051
 
 # StartOS runs service subcontainers as root and mounts /data owned by root, so run
 # as root (the base image's trailing `USER app` would hit EPERM writing to /data).

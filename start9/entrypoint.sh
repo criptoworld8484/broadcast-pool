@@ -75,6 +75,11 @@ export BROADCAST_POOL_RPC_PASS="${RPC_PASS}"
 export BROADCAST_POOL_INDEXER_URL="${ELECTRS_URL}"
 export BROADCAST_POOL_ELECTRUM_HOST="${BROADCAST_POOL_ELECTRUM_HOST:-0.0.0.0}"
 export BROADCAST_POOL_ELECTRUM_PORT="${BROADCAST_POOL_ELECTRUM_PORT:-50050}"
+# Dedicated Liana listener. Liana always sets a block-height nLockTime (anti-fee-sniping,
+# not disableable like Sparrow's MTP), so a tx arriving on the Sparrow port would be
+# categorized "by_block". Liana connects to THIS port so it is tagged source=liana and
+# ingested as manual/pending, ready to schedule a date/time from the dashboard.
+export BROADCAST_POOL_LIANA_ELECTRUM_PORT="${BROADCAST_POOL_LIANA_ELECTRUM_PORT:-50051}"
 export BROADCAST_POOL_WEB_HOST="${BROADCAST_POOL_WEB_HOST:-0.0.0.0}"
 export BROADCAST_POOL_WEB_PORT="${BROADCAST_POOL_WEB_PORT:-8080}"
 # Platform hint: the dashboard can't auto-detect a LAN IP here (the container only sees
