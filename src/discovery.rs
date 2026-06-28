@@ -988,12 +988,36 @@ pub fn apply_network_from_rpc(config: &mut Config, rpc: Option<&BitcoinRpc>) {
     let Some(rpc) = rpc else {
         return;
     };
-    let chain = match rpc.get_bitcoin_chain() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!("Could not read Bitcoin chain for network detection: {}", e);
-            return;
+    // Bitcoin Core can still be warming up (RPC not accepting yet, or "loading block
+    // index", error -28) for a while after start — notably longer on mainnet than on
+    // testnet4/signet. The network is detected once, early, before the (network-specific)
+    // data dir, DB and reported genesis are derived, so a single failed attempt would
+    // silently leave the config default (testnet4) even though the node is mainnet.
+    // Retry until the RPC answers, bounded to ~90s.
+    let mut chain = None;
+    for attempt in 1..=30 {
+        match rpc.get_bitcoin_chain() {
+            Ok(c) => {
+                chain = Some(c);
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Network detection: Bitcoin Core RPC not ready (attempt {}/30): {}",
+                    attempt,
+                    e
+                );
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
         }
+    }
+    let Some(chain) = chain else {
+        tracing::error!(
+            "Could not detect network from Bitcoin Core after retries — using configured \
+             default ({}). Restart once Bitcoin Core is fully started if the network is wrong.",
+            config.network.network_type.data_dir_name()
+        );
+        return;
     };
     let detected = network_from_bitcoin_chain(&chain);
     if config.network.network_type != detected {
