@@ -1,10 +1,10 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '0.3.16:1',
+  version: '0.3.16:2',
   releaseNotes: {
-    en_US: 'Initial StartOS package: Electrum broadcast pool for Sparrow/Liana with virtual mempool and scheduled broadcasting. Network auto-detected from Bitcoin Core.',
-    es_ES: 'Paquete inicial para StartOS: pool de difusión Electrum para Sparrow/Liana con mempool virtual y difusión programada. Red autodetectada desde Bitcoin Core.',
+    en_US: 'Wait for the Bitcoin Core dependency to be reachable before starting, so the network is detected correctly (fixes the dashboard showing testnet4 on a mainnet node when the dependency network was not yet ready at startup).',
+    es_ES: 'Espera a que la dependencia Bitcoin Core sea alcanzable antes de arrancar, para detectar bien la red (corrige que el panel mostrara testnet4 en un nodo mainnet cuando la red de dependencias aún no estaba lista al arrancar).',
   },
   migrations: {
     up: async () => {},

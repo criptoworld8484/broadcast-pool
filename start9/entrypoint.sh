@@ -67,6 +67,36 @@ RPC_USER="${COOKIE%%:*}"
 RPC_PASS="${COOKIE#*:}"
 log "Cookie resolved from ${COOKIE_FILE} (user=${RPC_USER})"
 
+# --- Wait for the StartOS dependency network to be ready ---------------------
+# On a busy node StartOS can take a while to register the dependency DNS/route for
+# this service. The binary auto-detects the network from Bitcoin Core at startup, so
+# if it launches before bitcoind.startos resolves, detection fails and it falls back
+# to the default (testnet4) on a mainnet node. getent (glibc) uses the container's
+# resolver (10.0.3.1); poll until the bitcoind host resolves before launching.
+rpc_dep_host() {
+  h="${BITCOIN_RPC_URL#*://}"   # strip scheme
+  echo "${h%%:*}"               # strip :port
+}
+DEP_HOST="$(rpc_dep_host)"
+DEP_WAIT_MAX="${BITCOIN_DEP_WAIT_MAX:-300}"
+elapsed=0
+while [ "${elapsed}" -lt "${DEP_WAIT_MAX}" ]; do
+  if getent hosts "${DEP_HOST}" >/dev/null 2>&1; then
+    log "Dependency host ${DEP_HOST} resolves — Bitcoin Core reachable"
+    break
+  fi
+  log "Waiting for dependency host ${DEP_HOST} to resolve (${elapsed}s/${DEP_WAIT_MAX}s)"
+  sleep 5
+  elapsed=$((elapsed + 5))
+done
+if ! getent hosts "${DEP_HOST}" >/dev/null 2>&1; then
+  log "WARN: ${DEP_HOST} still does not resolve after ${DEP_WAIT_MAX}s — starting anyway"
+fi
+
+# Make broadcast_pool's own logs visible (StartOS sets RUST_LOG=warn,startos=debug,
+# which hides the network-detection/genesis INFO lines).
+export RUST_LOG="${RUST_LOG_OVERRIDE:-broadcast_pool=info,warn,startos=debug}"
+
 # --- Export the binary's generic contract -----------------------------------
 export BROADCAST_POOL_DATA_DIR="${DATA_DIR}"
 export BROADCAST_POOL_RPC_URL="${BITCOIN_RPC_URL}"
