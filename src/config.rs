@@ -308,6 +308,19 @@ impl NetworkType {
         }
     }
 
+    /// Reverse of `genesis_hash`: map a node's genesis hash to its network. Used to
+    /// detect the network from the genesis (resolved via a fresh RPC client), which is
+    /// more reliable than `getblockchaininfo.chain` on some setups.
+    pub fn from_genesis_hash(hash: &str) -> Option<NetworkType> {
+        let h = hash.trim().to_lowercase();
+        for net in [NetworkType::Mainnet, NetworkType::Testnet4, NetworkType::Signet] {
+            if net.genesis_hash() == h {
+                return Some(net);
+            }
+        }
+        None
+    }
+
     pub fn display_name(&self) -> &'static str {
         match self {
             NetworkType::Mainnet => "Mainnet",
@@ -417,6 +430,19 @@ mod tests {
 
     // The signet/testnet4 constants were previously wrong (signet had 65 chars; testnet4
     // held testnet3's hash), which broke Liana's genesis check. Guard all networks.
+    #[test]
+    fn from_genesis_hash_maps_back() {
+        for nt in [NetworkType::Mainnet, NetworkType::Testnet4, NetworkType::Signet] {
+            assert_eq!(NetworkType::from_genesis_hash(nt.genesis_hash()), Some(nt.clone()));
+        }
+        // case-insensitive + trimmed
+        assert_eq!(
+            NetworkType::from_genesis_hash("  000000000019D6689C085AE165831E934FF763AE46A2A6C172B3F1B60A8CE26F  "),
+            Some(NetworkType::Mainnet)
+        );
+        assert_eq!(NetworkType::from_genesis_hash("deadbeef"), None);
+    }
+
     #[test]
     fn genesis_hashes_are_valid_and_correct() {
         for nt in [NetworkType::Mainnet, NetworkType::Testnet4, NetworkType::Signet] {

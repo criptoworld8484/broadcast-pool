@@ -363,8 +363,30 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Auto-detect network from Bitcoin Core BEFORE deriving the network-specific data dir and DB.
-    discovery::apply_network_from_rpc(&mut config, rpc.as_deref());
+    // Auto-detect network BEFORE deriving the network-specific data dir / DB. Resolve the
+    // chain's real genesis (via a fresh RPC client built from the configured creds — this
+    // path is reliable even where the shared `rpc` handle's getblockchaininfo isn't) and
+    // map it to the network. Unknown genesis (e.g. custom signet) → fall back to the chain
+    // name; if all fail, the configured default stands.
+    let genesis = discovery::expected_genesis_hash(&config.network.network_type);
+    if let Some(net) = NetworkType::from_genesis_hash(&genesis) {
+        if config.network.network_type != net {
+            tracing::info!(
+                "Network from genesis {} → {} (was {})",
+                genesis,
+                net.data_dir_name(),
+                config.network.network_type.data_dir_name()
+            );
+        }
+        config.network.network_type = net;
+    } else {
+        discovery::apply_network_from_rpc(&mut config, rpc.as_deref());
+    }
+    config.network.resolved_genesis = Some(genesis);
+    tracing::info!(
+        "Resolved genesis hash: {}",
+        config.network.resolved_genesis.as_deref().unwrap_or("?")
+    );
 
     let data_dir = get_data_dir(&config)?;
     std::fs::create_dir_all(&data_dir)?;
@@ -410,16 +432,6 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-
-    // Resolve the chain's real genesis once (queries Bitcoin Core; handles custom
-    // signets and corrects the built-in constants). server.features reports this so
-    // wallets like Liana that validate genesis at setup don't fail with a mismatch.
-    config.network.resolved_genesis =
-        Some(discovery::expected_genesis_hash(&config.network.network_type));
-    tracing::info!(
-        "Resolved genesis hash: {}",
-        config.network.resolved_genesis.as_deref().unwrap_or("?")
-    );
 
     let shared_config = Arc::new(std::sync::Mutex::new(config.clone()));
 
