@@ -9,7 +9,7 @@
 # NOTE: the base image is currently linux/amd64 only, so this package is x86_64 only.
 # Multi-arch (aarch64) is a follow-up: publish a multi-arch base image or per-arch
 # release binaries and download the matching one here.
-FROM ghcr.io/criptoworld8484/broadcast-pool-umbrel:0.3.16
+FROM ghcr.io/criptoworld8484/broadcast-pool-umbrel:0.3.17
 
 USER root
 COPY --chmod=0755 entrypoint.sh /entrypoint.sh
