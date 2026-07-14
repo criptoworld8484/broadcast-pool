@@ -213,6 +213,7 @@ impl Config {
                 broadcast_mode: BroadcastMode::Immediate,
                 default_delay_hours: 24,
                 scheduled_datetime: None,
+                liana_virtual_block: LianaVirtualBlockConfig::default(),
                 min_delay_hours: 2,
                 max_delay_hours: 72,
                 min_fee_rate: 1.0,
@@ -352,10 +353,25 @@ pub struct ScheduleConfig {
     pub default_delay_hours: u64,
     #[serde(default)]
     pub scheduled_datetime: Option<String>,
+    #[serde(default)]
+    pub liana_virtual_block: LianaVirtualBlockConfig,
     pub min_delay_hours: u64,
     pub max_delay_hours: u64,
     pub min_fee_rate: f64,
     pub max_fee_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LianaVirtualBlockConfig {
+    /// Tick armed: while true, Liana sessions are served a virtual (future) tip.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Absolute virtual block height to serve to the next Liana tx. Advances +2 per capture.
+    #[serde(default)]
+    pub target_height: u64,
+    /// Real chain height captured when the tick was armed. Auto-disarm at armed_at_height + 10.
+    #[serde(default)]
+    pub armed_at_height: u64,
 }
 
 fn default_delay_hours() -> u64 {
@@ -368,6 +384,7 @@ impl Default for ScheduleConfig {
             broadcast_mode: BroadcastMode::Immediate,
             default_delay_hours: 24,
             scheduled_datetime: None,
+            liana_virtual_block: LianaVirtualBlockConfig::default(),
             min_delay_hours: 2,
             max_delay_hours: 72,
             min_fee_rate: 1.0,
@@ -462,5 +479,33 @@ mod tests {
             NetworkType::Testnet4.genesis_hash(),
             "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043"
         );
+    }
+
+    #[cfg(test)]
+    mod liana_vb_tests {
+        use super::super::*;
+
+        #[test]
+        fn liana_virtual_block_defaults_disarmed() {
+            let c = LianaVirtualBlockConfig::default();
+            assert!(!c.enabled);
+            assert_eq!(c.target_height, 0);
+            assert_eq!(c.armed_at_height, 0);
+        }
+
+        #[test]
+        fn schedule_config_deserializes_without_liana_block() {
+            // Old configs on disk have no liana_virtual_block key; it must default in.
+            let toml = r#"
+                broadcast_mode = "Immediate"
+                default_delay_hours = 24
+                min_delay_hours = 2
+                max_delay_hours = 72
+                min_fee_rate = 1.0
+                max_fee_rate = 50.0
+            "#;
+            let sc: ScheduleConfig = toml::from_str(toml).expect("parse");
+            assert!(!sc.liana_virtual_block.enabled);
+        }
     }
 }
