@@ -956,12 +956,66 @@ fn spawn_chain_tip_refresh(indexer_url: &str, pool_manager: &Arc<PoolManager>) {
     });
 }
 
+/// The virtual tip height to serve, or None when the feature is disarmed or the peer is Sparrow.
+fn virtual_tip_height(cfg: &Config, is_liana: bool) -> Option<u64> {
+    let vb = &cfg.schedule.liana_virtual_block;
+    if is_liana && vb.enabled && vb.target_height > 0 {
+        Some(vb.target_height)
+    } else {
+        None
+    }
+}
+
+/// Answer `blockchain.block.header` (single) for a Liana virtual height above the real tip.
+/// Heights at/below the real tip, and `block.headers` ranges, return None → normal forwarding.
+fn serve_virtual_block_header(
+    request: &JsonRpcRequest,
+    pool_manager: &Arc<PoolManager>,
+    _virtual_tip: Option<u64>,
+) -> Option<serde_json::Value> {
+    if request.method != "blockchain.block.header" {
+        return None; // block.headers ranges: forward for now (Liana backfills via subscribe).
+    }
+    let params = request.params.as_ref()?.as_array()?;
+    let height = params.first()?.as_u64()?;
+    let (real_h, real_hex) = pool_manager.get_cached_chain_tip()?;
+    match virtual_headers::header_hex_at(real_h, &real_hex, height) {
+        Ok(Some(hex)) => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": hex,
+            "id": request.id
+        })),
+        _ => None,
+    }
+}
+
 async fn handle_headers_subscribe(
     request: &JsonRpcRequest,
     pool_manager: &Arc<PoolManager>,
     indexer_url: &str,
+    virtual_tip: Option<u64>,
 ) -> Result<serde_json::Value> {
     let id = request.id.clone();
+
+    // Liana virtual block: serve a fabricated tip ABOVE the real one. Never touches the shared
+    // real-tip cache (that is what Sparrow reads), so it can only lie to this one Liana session.
+    if let Some(vtip) = virtual_tip {
+        if let Some((real_h, real_hex)) = pool_manager.get_cached_chain_tip() {
+            let up_to = vtip.max(real_h + 1);
+            match virtual_headers::header_hex_at(real_h, &real_hex, up_to) {
+                Ok(Some(hex)) => {
+                    tracing::info!("Serving Liana virtual tip height={} (real={})", up_to, real_h);
+                    return Ok(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "result": { "height": up_to, "hex": hex },
+                        "id": request.id
+                    }));
+                }
+                Ok(None) => {} // vtip <= real tip: fall through to the real tip below.
+                Err(e) => tracing::warn!("virtual header fabrication failed: {}", e),
+            }
+        }
+    }
 
     // Cache-first: Sparrow Test Connection must not block on slow Umbrel electrs.
     if let Some((height, hex)) = pool_manager.get_cached_chain_tip() {
@@ -1185,8 +1239,28 @@ async fn handle_one_subrequest(
         }
     }
 
+    if request.method == "blockchain.block.header"
+        || request.method == "blockchain.block.headers"
+    {
+        let vtip = {
+            let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+            let is_liana = session.effective_source(source_label) == "liana";
+            virtual_tip_height(&cfg, is_liana)
+        };
+        if vtip.is_some() {
+            if let Some(resp) = serve_virtual_block_header(request, pool_manager, vtip) {
+                return Ok(resp);
+            }
+        }
+    }
+
     if request.method == "blockchain.headers.subscribe" {
-        return handle_headers_subscribe(request, pool_manager, indexer_url).await;
+        let vtip = {
+            let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+            let is_liana = session.effective_source(source_label) == "liana";
+            virtual_tip_height(&cfg, is_liana)
+        };
+        return handle_headers_subscribe(request, pool_manager, indexer_url, vtip).await;
     }
 
     if !indexer_url.is_empty() {
@@ -2395,6 +2469,21 @@ mod tests {
 
         // The dedicated liana listener is always liana regardless of fingerprint.
         assert_eq!(sparrow.effective_source("liana"), "liana");
+    }
+
+    #[test]
+    fn virtual_tip_only_for_armed_liana() {
+        let mut cfg = Config::default_config();
+        cfg.schedule.liana_virtual_block.enabled = true;
+        cfg.schedule.liana_virtual_block.target_height = 950430;
+
+        assert_eq!(virtual_tip_height(&cfg, true), Some(950430));
+        // Never for Sparrow.
+        assert_eq!(virtual_tip_height(&cfg, false), None);
+
+        // Disarmed → nothing.
+        cfg.schedule.liana_virtual_block.enabled = false;
+        assert_eq!(virtual_tip_height(&cfg, true), None);
     }
 
     #[test]
