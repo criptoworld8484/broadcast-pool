@@ -1111,6 +1111,37 @@ impl PoolManager {
         );
 
         self.health_refresh_in_flight.store(false, Ordering::SeqCst);
+
+        self.maybe_disarm_virtual_block();
+    }
+
+    /// Disarm the virtual-block tick once real_height >= armed_at + 10. Cheap: a lock read plus,
+    /// only on the disarm edge, one config write. Called from the health poller.
+    pub fn maybe_disarm_virtual_block(&self) {
+        let real_height = match self.chain_health().height {
+            Some(h) => h,
+            None => return,
+        };
+        let snapshot = {
+            let mut cfg = match self.config.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let vb = &cfg.schedule.liana_virtual_block;
+            if !should_disarm(vb.enabled, vb.armed_at_height, real_height) {
+                return;
+            }
+            tracing::info!(
+                "Liana virtual block auto-disarmed (real height {} >= armed {} + 10)",
+                real_height,
+                cfg.schedule.liana_virtual_block.armed_at_height
+            );
+            cfg.schedule.liana_virtual_block.enabled = false;
+            cfg.clone()
+        };
+        if let Err(e) = crate::discovery::save_config_to_disk(&snapshot) {
+            tracing::warn!("Failed to persist virtual-block disarm: {}", e);
+        }
     }
 
     pub fn check_block_height(&self) -> Result<Option<u64>> {
@@ -1384,6 +1415,12 @@ fn is_retriable_broadcast_error(msg: &str) -> bool {
         || m.contains("too-long-mempool-chain")
 }
 
+/// Auto-disarm the Liana virtual block once the real chain has advanced 10 blocks past arming.
+/// Bounds the window in which we serve fake heights, even if the user forgets to unset the tick.
+fn should_disarm(enabled: bool, armed_at_height: u64, real_height: u64) -> bool {
+    enabled && real_height >= armed_at_height + 10
+}
+
 fn classify_mempool_congestion(fee_sat_vb: f64, network: &str) -> &'static str {
     let (low_max, high_min) = match network {
         "mainnet" => (10.0, 50.0),
@@ -1473,5 +1510,13 @@ mod tests {
         pm.merge_pending_scripthashes(txid, &[sh.to_string()]); // already present
 
         assert!(rx.try_recv().is_err(), "no push expected when no new scripthash");
+    }
+
+    #[test]
+    fn virtual_block_disarms_after_ten_blocks() {
+        assert!(!should_disarm(false, 100, 200)); // disabled → never
+        assert!(!should_disarm(true, 100, 109)); // 9 blocks in → still armed
+        assert!(should_disarm(true, 100, 110)); // exactly +10 → disarm
+        assert!(should_disarm(true, 100, 130)); // well past → disarm
     }
 }
