@@ -128,6 +128,21 @@ impl ElectrumClient {
         Ok((fee_rate, fee, vsize as usize))
     }
 
+    /// Software name reported by `server.version`, e.g. "electrs" or "Fulcrum". The reply is either
+    /// a bare string or `[server_name, protocol_version]` depending on the implementation.
+    pub fn server_software(&self) -> Result<Option<String>> {
+        let reply = self.rpc(
+            "server.version",
+            serde_json::json!(["broadcast-pool", "1.4"]),
+        )?;
+        let name = match &reply {
+            serde_json::Value::Array(items) => items.first().and_then(|v| v.as_str()),
+            serde_json::Value::String(s) => Some(s.as_str()),
+            _ => None,
+        };
+        Ok(name.and_then(crate::pool::chain_health::parse_indexer_software))
+    }
+
     pub fn test_connection(&self) -> Result<bool> {
         let height = self.get_block_height()?;
         tracing::info!(

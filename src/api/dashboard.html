@@ -783,6 +783,10 @@
                     <h3 data-i18n="protocol_banner_title">Virtual Mempool Active</h3>
                     <p data-i18n="protocol_banner_text">Transactions from your wallet are retained locally and shown as pending. Broadcast happens when the scheduler triggers.</p>
                 </div>
+                <div id="indexer-banner" class="protocol-banner" style="display:none; border-color: var(--amber); margin-top: 12px;">
+                    <h3 id="indexer-banner-title"></h3>
+                    <p id="indexer-banner-text"></p>
+                </div>
                 <div id="sparrow-readiness-banner" class="protocol-banner" style="display:none; border-color: var(--amber); margin-top: 12px;">
                     <h3 id="sparrow-readiness-title" data-i18n="sparrow_readiness_title">Sparrow setup required</h3>
                     <p id="sparrow-readiness-text"></p>
@@ -1177,7 +1181,13 @@
                 stat_confirmed: 'Confirmed', stat_confirmed_sub: 'In blockchain',
                 stat_mempool: 'Mempool', stat_mempool_sub: 'Network fee congestion',
                 sparrow_readiness_title: 'Sparrow — check before sending',
-                sparrow_readiness_no_indexer: 'Electrs indexer not connected (required for send confirmation).',
+                indexer_generic: 'electrs/Fulcrum',
+                indexer_banner_title_fallback: 'Indexer out of service — running on Bitcoin Core',
+                indexer_banner_fallback: 'Please check your {software} indexer at {url}: it appears to be out of service. As a workaround the app is reading the block height and median time straight from Bitcoin Core, so your scheduled transactions keep being broadcast on time, against up-to-date chain data. Your wallet cannot sync balances or history until the indexer is back.',
+                indexer_banner_title_stopped: 'Schedules paused — no chain data source',
+                indexer_banner_stopped: 'Please check your {software} indexer at {url}: it appears to be out of service, and Bitcoin Core is not reachable either, so there is no way to read the chain. Scheduled broadcasts are paused until one of the two comes back.',
+                indexer_banner_title_ibd: 'Schedules paused — Bitcoin Core is still syncing',
+                indexer_banner_ibd: 'Your {software} indexer at {url} appears to be out of service, and Bitcoin Core cannot take over yet: it is still in initial block download, so its tip is behind the network. Schedules are paused rather than fired against a stale height.',
                 sparrow_readiness_tor: 'In Sparrow: Settings→Network → disable proxy and built-in Tor.',
                 sparrow_readiness_url: 'Server URL:',
                 stat_mempool_unavailable: 'Bitcoin node not connected',
@@ -1195,6 +1205,12 @@
                 cfg_server_status: 'Server Status', cfg_connected: 'Connected', cfg_disconnected: 'Disconnected',
                 cfg_electrum_hint: 'Electrum server for your wallet', cfg_use_url: 'Use this URL in your wallet settings',
                 cfg_indexer_status: 'Indexer Status', cfg_checking: 'Checking...', cfg_connected_to: 'Connected to Electrs/Fulcrum',
+                cfg_indexer_down_core_ok: 'Indexer down — using Bitcoin Core',
+                cfg_indexer_down_core_ok_hint: 'Schedules keep running: Bitcoin Core supplies the block height and median time. Wallet address history is unavailable until the indexer returns.',
+                cfg_no_chain_source: 'No chain data source',
+                cfg_no_chain_source_hint: 'Neither the indexer nor Bitcoin Core is reachable. Scheduled broadcasts are paused until one comes back.',
+                cfg_core_ibd: 'Bitcoin Core is still syncing',
+                cfg_core_ibd_hint: 'Core is in initial block download, so its tip is behind the network. Schedules are paused to avoid broadcasting against a stale height.',
                 cfg_broadcast_mode: 'Broadcast Mode', cfg_mode_immediate: 'Immediate', cfg_mode_scheduled: 'Scheduled (by time)', cfg_mode_by_block: 'By Block Height',
                 cfg_mode_hint: 'Wallet transactions are retained in the virtual mempool; the scheduler broadcasts per this mode',
                 cfg_scheduled_datetime: 'Scheduled Date & Time (optional)',
@@ -1287,7 +1303,13 @@
                 stat_confirmed: 'Confirmada', stat_confirmed_sub: 'En blockchain',
                 stat_mempool: 'Mempool', stat_mempool_sub: 'Congesti\u00f3n de fees en red',
                 sparrow_readiness_title: 'Sparrow — revisar antes de enviar',
-                sparrow_readiness_no_indexer: 'Indexer electrs no conectado (necesario para confirmar env\u00edos).',
+                indexer_generic: 'electrs/Fulcrum',
+                indexer_banner_title_fallback: 'Indexador fuera de servicio \u2014 funcionando con Bitcoin Core',
+                indexer_banner_fallback: 'Por favor, compruebe su indexador {software} en {url}: parece estar fuera de servicio. La app, como workaround, est\u00e1 leyendo la altura de bloque y el tiempo mediano directamente de Bitcoin Core, de modo que las programaciones de sus transacciones se siguen llevando a cabo a su hora y con datos actualizados de la cadena. Su monedero no podr\u00e1 sincronizar saldos ni historial hasta que vuelva el indexador.',
+                indexer_banner_title_stopped: 'Programaciones en pausa \u2014 sin fuente de datos de la cadena',
+                indexer_banner_stopped: 'Por favor, compruebe su indexador {software} en {url}: parece estar fuera de servicio, y Bitcoin Core tampoco responde, as\u00ed que no hay forma de leer la cadena. Las difusiones programadas est\u00e1n en pausa hasta que vuelva alguno de los dos.',
+                indexer_banner_title_ibd: 'Programaciones en pausa \u2014 Bitcoin Core a\u00fan se est\u00e1 sincronizando',
+                indexer_banner_ibd: 'Su indexador {software} en {url} parece estar fuera de servicio, y Bitcoin Core todav\u00eda no puede sustituirlo: sigue en descarga inicial de bloques, as\u00ed que su punta va por detr\u00e1s de la red. Las programaciones se pausan en lugar de dispararse contra una altura obsoleta.',
                 sparrow_readiness_tor: 'En Sparrow: Ajustes\u2192Red \u2192 desactiva proxy y Tor integrado.',
                 sparrow_readiness_url: 'URL servidor:',
                 stat_mempool_unavailable: 'Nodo Bitcoin no conectado',
@@ -1305,6 +1327,12 @@
                 cfg_server_status: 'Estado del Servidor', cfg_connected: 'Conectado', cfg_disconnected: 'Desconectado',
                 cfg_electrum_hint: 'Servidor Electrum para tu wallet', cfg_use_url: 'Usar esta URL en la configuraci\u00f3n de tu wallet',
                 cfg_indexer_status: 'Estado del Indexer', cfg_checking: 'Verificando...', cfg_connected_to: 'Conectado a Electrs/Fulcrum',
+                cfg_indexer_down_core_ok: 'Indexador caído — usando Bitcoin Core',
+                cfg_indexer_down_core_ok_hint: 'Las programaciones siguen funcionando: Bitcoin Core aporta la altura de bloque y el tiempo mediano. El historial de direcciones del monedero no está disponible hasta que vuelva el indexador.',
+                cfg_no_chain_source: 'Sin fuente de datos de la cadena',
+                cfg_no_chain_source_hint: 'Ni el indexador ni Bitcoin Core responden. Las difusiones programadas están en pausa hasta que vuelva alguno.',
+                cfg_core_ibd: 'Bitcoin Core aún se está sincronizando',
+                cfg_core_ibd_hint: 'Core está en descarga inicial de bloques, así que su punta va por detrás de la red. Las programaciones están en pausa para no difundir contra una altura obsoleta.',
                 cfg_broadcast_mode: 'Modo de Transmisi\u00f3n', cfg_mode_immediate: 'Inmediato', cfg_mode_scheduled: 'Programada (por tiempo)', cfg_mode_by_block: 'Por Altura de Bloque',
                 cfg_mode_hint: 'Las TX de la wallet se retienen en el mempool virtual; el scheduler transmite seg\u00fan este modo',
                 cfg_scheduled_datetime: 'Fecha y Hora Programada (opcional)',
@@ -1771,6 +1799,38 @@
             document.getElementById('schedule-overlay').classList.add('active');
         }
 
+        // Infrastructure banner: names the indexer that is down, where it is, and — crucially —
+        // whether the pool is still honouring schedules through Bitcoin Core or has had to stop.
+        // It is a different fault from a misconfigured wallet, so it gets its own banner.
+        function updateIndexerBanner(status) {
+            const el = document.getElementById('indexer-banner');
+            const title = document.getElementById('indexer-banner-title');
+            const text = document.getElementById('indexer-banner-text');
+            if (!el || !title || !text || !status) return;
+
+            if (status.electrum_connected) {
+                el.style.display = 'none';
+                return;
+            }
+
+            let key;
+            if (status.chain_source === 'bitcoin_core') {
+                key = 'fallback';
+            } else if (status.core_ibd) {
+                key = 'ibd';
+            } else {
+                key = 'stopped';
+            }
+
+            title.textContent = t('indexer_banner_title_' + key);
+            text.textContent = t('indexer_banner_' + key)
+                .replace('{software}', status.indexer_software || t('indexer_generic'))
+                .replace('{url}', status.indexer_url || '—');
+            // Amber while the fallback is carrying the schedules; red once nothing is.
+            el.style.borderColor = key === 'fallback' ? 'var(--amber)' : 'var(--red)';
+            el.style.display = 'block';
+        }
+
         function updateSparrowReadinessBanner(status) {
             const el = document.getElementById('sparrow-readiness-banner');
             const text = document.getElementById('sparrow-readiness-text');
@@ -1781,7 +1841,6 @@
             }
             el.style.display = 'block';
             const parts = [];
-            if (!status.electrum_connected) parts.push(t('sparrow_readiness_no_indexer'));
             parts.push(status.sparrow_tor_warning || t('sparrow_readiness_tor'));
             if (status.wallet_connect_url && !status.wallet_connect_url.includes('<')) {
                 parts.push(t('sparrow_readiness_url') + ' tcp://' + status.wallet_connect_url.replace(/^tcp:\/\//, ''));
@@ -1816,7 +1875,9 @@
                 }
 
                 if (statusRes.ok) {
-                    updateSparrowReadinessBanner(await statusRes.json());
+                    const status = await statusRes.json();
+                    updateIndexerBanner(status);
+                    updateSparrowReadinessBanner(status);
                 }
 
                 document.getElementById('s-pending').textContent = stats.pending;
@@ -2311,40 +2372,65 @@
                     const text = document.getElementById('indexer-status-text');
                     const height = document.getElementById('indexer-height');
 
+                    const hint = document.getElementById('indexer-status-hint');
+
+                    // The indexer being down is not the same as the pool being down: Bitcoin Core
+                    // supplies the same height and MTP, so schedules keep firing. Only chain_source
+                    // === 'none' actually pauses them.
                     if (status.electrum_connected) {
                         dot.style.background = 'var(--green)';
                         dot.style.boxShadow = '0 0 8px var(--green)';
-                        text.textContent = t('cfg_connected');
+                        text.textContent = status.indexer_software
+                            ? `${t('cfg_connected')} (${status.indexer_software})`
+                            : t('cfg_connected');
                         text.style.color = 'var(--green)';
-                        const hint = document.getElementById('indexer-status-hint');
                         if (hint) {
                             hint.textContent = appUmbrelMode ? t('cfg_indexer_status_hint') : t('cfg_indexer_status_hint_dev');
                             hint.style.color = 'var(--text-dim)';
                         }
-                        if (status.indexer_height) {
-                            let heightText = `Block height: ${status.indexer_height}`;
-                            if (status.chain_mtp) {
-                                heightText += ` | MTP: ${formatUnixTs(status.chain_mtp)}`;
-                            }
-                            height.textContent = heightText;
-                            const bh = document.getElementById('s-blockheight');
-                            const bhSub = document.getElementById('s-blockheight-sub');
-                            if (bh) bh.textContent = status.indexer_height;
-                            if (bhSub) {
-                                bhSub.textContent = status.chain_mtp
-                                    ? `MTP ${formatUnixTs(status.chain_mtp)}`
-                                    : new Date().toLocaleTimeString();
-                            }
+                    } else if (status.chain_source === 'bitcoin_core') {
+                        dot.style.background = 'var(--amber)';
+                        dot.style.boxShadow = '0 0 8px var(--amber)';
+                        text.textContent = t('cfg_indexer_down_core_ok');
+                        text.style.color = 'var(--amber)';
+                        if (hint) {
+                            hint.textContent = t('cfg_indexer_down_core_ok_hint');
+                            hint.style.color = 'var(--text-dim)';
                         }
                     } else {
                         dot.style.background = 'var(--red)';
-                        text.textContent = t('cfg_disconnected');
+                        dot.style.boxShadow = 'none';
+                        text.textContent = status.core_ibd ? t('cfg_core_ibd') : t('cfg_no_chain_source');
                         text.style.color = 'var(--red)';
-                        const hint = document.getElementById('indexer-status-hint');
-                        if (hint && status.indexer_status_hint) {
-                            hint.textContent = status.indexer_status_hint;
+                        if (hint) {
+                            hint.textContent = status.core_ibd
+                                ? t('cfg_core_ibd_hint')
+                                : (status.indexer_status_hint || t('cfg_no_chain_source_hint'));
                             hint.style.color = 'var(--amber)';
                         }
+                    }
+
+                    // Height and MTP come from whichever source is live, so they must keep
+                    // updating while the indexer is down — that is the whole point of the fallback.
+                    if (status.chain_height) {
+                        let heightText = `Block height: ${status.chain_height}`;
+                        if (status.chain_mtp) {
+                            heightText += ` | MTP: ${formatUnixTs(status.chain_mtp)}`;
+                        }
+                        if (status.chain_source === 'bitcoin_core') {
+                            heightText += ' (Bitcoin Core)';
+                        }
+                        height.textContent = heightText;
+                        const bh = document.getElementById('s-blockheight');
+                        const bhSub = document.getElementById('s-blockheight-sub');
+                        if (bh) bh.textContent = status.chain_height;
+                        if (bhSub) {
+                            bhSub.textContent = status.chain_mtp
+                                ? `MTP ${formatUnixTs(status.chain_mtp)}`
+                                : new Date().toLocaleTimeString();
+                        }
+                    } else {
+                        height.textContent = '';
                     }
                 }
             } catch (e) {

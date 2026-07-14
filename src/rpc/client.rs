@@ -113,4 +113,24 @@ impl BitcoinRpc {
             .context("Failed to get blockchain info")?;
         Ok(info.median_time)
     }
+
+    /// Everything the chain clock needs, in a single `getblockchaininfo`:
+    /// `(height, median_time_past, in_initial_block_download, sync_percentage)`.
+    pub fn get_chain_status(&self) -> Result<(u64, u64, bool, f64)> {
+        let info = self
+            .client
+            .get_blockchain_info()
+            .context("Failed to get blockchain info")?;
+        let sync_pct = if info.initial_block_download {
+            info.verification_progress * 100.0
+        } else {
+            100.0
+        };
+        Ok((
+            info.blocks,
+            info.median_time,
+            info.initial_block_download,
+            sync_pct,
+        ))
+    }
 }

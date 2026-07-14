@@ -391,6 +391,16 @@ struct StatusResponse {
     electrum_connected: bool,
     indexer_height: Option<u64>,
     chain_mtp: Option<u64>,
+    /// Which backend is serving the chain clock right now: `indexer`, `bitcoin_core` or `none`.
+    chain_source: crate::pool::ChainSource,
+    /// Tip height from whichever source is alive, so the UI keeps ticking on Core alone.
+    chain_height: Option<u64>,
+    /// `host:port` of the configured indexer, for the degraded-mode message.
+    indexer_url: String,
+    /// Indexer software name (`electrs`, `Fulcrum`); `None` until known.
+    indexer_software: Option<String>,
+    core_ibd: bool,
+    core_sync_pct: Option<f64>,
     pool_stats: PoolStats,
     retain_by_default: bool,
     #[serde(alias = "sparrow_connect_url")]
@@ -618,70 +628,29 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         }
     }
 
+    // Everything below is a cache read: the health poller owns the probing, so /api/status stays
+    // fast even when the indexer is unreachable (it used to block up to 8s on a dead socket).
     let result = tokio::task::spawn_blocking(move || {
         let stats = pool_manager.get_stats().map_err(|e| e.to_string())?;
-        let rpc_connected = if let Some(rpc) = pool_manager.get_rpc() {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let rpc_clone = rpc.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(rpc_clone.test_connection().unwrap_or(false));
-            });
-            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or(false)
-        } else {
-            false
-        };
-        let electrum_connected = if let Some(indexer) = pool_manager.get_indexer() {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let idx = indexer.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(idx.test_connection().unwrap_or(false));
-            });
-            rx.recv_timeout(std::time::Duration::from_secs(8)).unwrap_or(false)
-        } else {
-            false
-        };
-        let indexer_height = if electrum_connected {
-            pool_manager.check_block_height().ok().flatten()
-        } else {
-            None
-        };
-        let chain_mtp = pool_manager.get_chain_mtp().ok();
-        let network = {
-            let cfg = config.lock().map_err(|e| e.to_string())?;
-            cfg.network.network_type.data_dir_name().to_string()
-        };
-        let network_display = {
-            let cfg = config.lock().map_err(|e| e.to_string())?;
-            cfg.network.network_type.display_name().to_string()
-        };
-        let wallet_url = {
-            let cfg = config.lock().map_err(|e| e.to_string())?;
-            wallet_connect_url(&cfg)
-        };
-        Ok::<_, String>((
-            stats,
-            rpc_connected,
-            electrum_connected,
-            indexer_height,
-            chain_mtp,
-            network,
-            network_display,
-            wallet_url,
-        ))
+        let health = pool_manager.chain_health();
+        let cfg = config.lock().map_err(|e| e.to_string())?;
+        let network = cfg.network.network_type.data_dir_name().to_string();
+        let network_display = cfg.network.network_type.display_name().to_string();
+        let wallet_url = wallet_connect_url(&cfg);
+        let indexer_url = cfg
+            .indexer
+            .as_ref()
+            .map(|i| crate::discovery::display_indexer_url(&i.url))
+            .unwrap_or_default();
+        Ok::<_, String>((stats, health, network, network_display, wallet_url, indexer_url))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {}", e)))?;
 
-    let (
-        pool_stats,
-        rpc_connected,
-        electrum_connected,
-        indexer_height,
-        chain_mtp,
-        network,
-        network_display,
-        wallet_url,
-    ) = result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (pool_stats, health, network, network_display, wallet_url, indexer_url) =
+        result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let electrum_connected = health.indexer_up;
 
     let indexer_status_hint = {
         let cfg = state.config.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -692,17 +661,24 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         network,
         network_display,
         supported_networks: supported_networks_vec(),
-        rpc_connected,
+        rpc_connected: health.core_up,
         electrum_connected,
-        indexer_height,
-        chain_mtp,
+        indexer_height: if electrum_connected { health.height } else { None },
+        chain_mtp: health.mtp,
+        chain_source: health.source,
+        chain_height: health.height,
+        indexer_url,
+        indexer_software: health.indexer_software.clone(),
+        core_ibd: health.core_ibd,
+        core_sync_pct: health.core_sync_pct,
         pool_stats,
         retain_by_default: true,
         wallet_connect_url: wallet_url.clone(),
         indexer_status_hint,
-        sparrow_ready: electrum_connected
-            && !wallet_url.is_empty()
-            && !wallet_url.contains('<'),
+        // Wallet-side readiness only (is the connect URL usable). A dead indexer is an
+        // infrastructure fault, not a Sparrow misconfiguration, and it now has its own banner:
+        // folding it in here told the user to go fix the wallet, which is not where the fault is.
+        sparrow_ready: !wallet_url.is_empty() && !wallet_url.contains('<'),
         sparrow_tor_warning: "Disable Sparrow Settings→Network proxy/Tor or broadcasts bypass this pool (mempool.space). Use tcp://LAN:50050 only.".into(),
     }))
 }
@@ -957,7 +933,9 @@ async fn get_indexer_debug(
     let pool_manager = state.pool_manager.clone();
     let config = state.config.clone();
     let diagnostics = tokio::task::spawn_blocking(move || {
-        let connected = pool_manager.indexer_healthy();
+        // Diagnostics are user-triggered, so probe for real rather than trusting the snapshot.
+        pool_manager.refresh_chain_health();
+        let connected = pool_manager.chain_health().indexer_up;
         let cfg = config.lock().map_err(|e| e.to_string())?;
         Ok(crate::discovery::umbrel_indexer_diagnostics(&cfg, connected))
     })

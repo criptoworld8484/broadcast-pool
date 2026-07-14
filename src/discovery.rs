@@ -1219,8 +1219,18 @@ mod tests {
         );
     }
 
+    /// `is_umbrel_mode()` reads process-wide env vars, and cargo runs these tests in parallel
+    /// threads of one process: a test that sets BROADCAST_POOL_UMBREL flips the behaviour of every
+    /// test reading it. Serialize the writers and the readers on one lock.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn mistaken_umbrel_lan_override_detects_wallet_ip() {
+        let _env = env_guard();
         std::env::set_var("BROADCAST_POOL_UMBREL", "1");
         std::env::set_var("BROADCAST_POOL_LAN_IP", "192.168.50.26");
         std::env::set_var("APP_ELECTRS_NODE_IP", "10.21.21.9");
@@ -1251,6 +1261,7 @@ mod tests {
 
     #[test]
     fn candidate_urls_try_ssl_first_on_50002() {
+        let _env = env_guard();
         let urls = candidate_urls_for_host_port("192.168.50.97", 50002);
         assert_eq!(urls[0], "ssl://192.168.50.97:50002");
         assert_eq!(urls[1], "tcp://192.168.50.97:50002");
@@ -1258,6 +1269,7 @@ mod tests {
 
     #[test]
     fn connection_candidates_expand_stored_tcp_url() {
+        let _env = env_guard();
         let urls = connection_url_candidates("tcp://192.168.50.97:50002");
         assert_eq!(urls.len(), 2);
         assert!(urls.contains(&"ssl://192.168.50.97:50002".to_string()));
@@ -1266,6 +1278,7 @@ mod tests {
 
     #[test]
     fn candidate_urls_try_tcp_and_ssl_on_both_ports() {
+        let _env = env_guard();
         let urls = candidate_urls_for_host("192.168.50.97", &INDEXER_PORTS);
         assert_eq!(urls.len(), 4);
         assert_eq!(urls[0], "tcp://192.168.50.97:50001");
@@ -1276,6 +1289,7 @@ mod tests {
 
     #[test]
     fn sanitize_clears_mistaken_umbrel_lan_override() {
+        let _env = env_guard();
         std::env::set_var("BROADCAST_POOL_UMBREL", "1");
         std::env::set_var("BROADCAST_POOL_LAN_IP", "192.168.50.26");
         std::env::set_var("APP_ELECTRS_NODE_IP", "10.21.21.9");
