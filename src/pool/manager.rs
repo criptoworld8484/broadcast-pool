@@ -1046,7 +1046,10 @@ impl PoolManager {
         let core = self.rpc.as_ref().and_then(|rpc| match rpc.get_chain_status() {
             Ok(status) => Some(status),
             Err(e) => {
-                tracing::debug!("Bitcoin Core chain status failed: {}", e);
+                // `{:#}` prints the whole error chain: without the source, an RPC fault is
+                // indistinguishable from a deserialization one, and this is the log a user
+                // sends us when the fallback did not kick in.
+                tracing::debug!("Bitcoin Core chain status failed: {:#}", e);
                 None
             }
         });
