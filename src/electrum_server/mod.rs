@@ -1,4 +1,5 @@
 mod pending;
+mod virtual_headers;
 
 use anyhow::{Context, Result};
 use bitcoin::consensus::Decodable;
