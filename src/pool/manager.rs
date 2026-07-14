@@ -487,7 +487,10 @@ impl PoolManager {
                     results.push((tx.id, Ok(txid)));
                 }
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    // `{:#}` keeps the node's rejection reason, which lives in the error's source:
+                    // it is what tells a retriable "non-final" apart from a permanent
+                    // "bad-txns-inputs-missingorspent", and it is what the dashboard shows the user.
+                    let err_msg = format!("{:#}", e);
                     if is_retriable_broadcast_error(&err_msg) {
                         tracing::info!(
                             "Broadcast deferred for {} (will retry): {}",
@@ -1403,6 +1406,34 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::Database;
+
+    // Every broadcast backend wraps the node's rejection reason in a `.context()`, so the reason
+    // ("non-final", "bad-txns-inputs-missingorspent"…) only lives in the error's *source*. Render
+    // with `{}` and all we keep is our own context line — which then (a) reaches the dashboard as
+    // a useless "Failed to broadcast transaction" and (b) makes is_retriable_broadcast_error blind,
+    // so a tx the node would accept a block later is marked permanently failed.
+    #[test]
+    fn broadcast_error_keeps_the_node_rejection_reason() {
+        let err = anyhow::anyhow!("JSON-RPC error: non-final transaction")
+            .context("Failed to broadcast transaction");
+
+        let flat = err.to_string();
+        assert!(!is_retriable_broadcast_error(&flat));
+
+        let full = format!("{:#}", err);
+        assert!(full.contains("non-final"), "full chain must carry the reason: {}", full);
+        assert!(is_retriable_broadcast_error(&full));
+    }
+
+    #[test]
+    fn permanent_rejections_are_not_retried() {
+        let err = anyhow::anyhow!(
+            "JSON-RPC error: {{\"code\":-26,\"message\":\"bad-txns-inputs-missingorspent\"}}"
+        )
+        .context("Failed to broadcast transaction");
+
+        assert!(!is_retriable_broadcast_error(&format!("{:#}", err)));
+    }
 
     fn test_manager() -> (PoolManager, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
