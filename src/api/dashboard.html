@@ -925,6 +925,22 @@
                             </select>
                             <div class="setting-hint" data-i18n="cfg_mode_hint">How transactions from your wallet are broadcast</div>
                         </div>
+                        <div class="setting-group" id="cfg-liana-vb-group" style="display:none;">
+                            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                                <input type="checkbox" id="cfg-liana-vb-enabled" onchange="toggleLianaVb()">
+                                <span data-i18n="cfg_liana_vb_tick">Programar ciclado UTXO de Liana</span>
+                            </label>
+                            <div id="cfg-liana-vb-fields" style="display:none; margin-top:12px;">
+                                <label data-i18n="cfg_liana_vb_height">Altura de bloque virtual</label>
+                                <input type="number" id="cfg-liana-vb-height" min="1" step="1"
+                                       oninput="updateLianaVbDate()"
+                                       style="width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:16px 20px; border-radius:12px; font-family:var(--font-mono); font-size:16px;">
+                                <div class="setting-hint" id="cfg-liana-vb-date">&nbsp;</div>
+                                <div class="setting-hint" style="color:var(--amber); margin-top:8px;" data-i18n="cfg_liana_vb_warn">
+                                    Introduce la altura de bloque virtual que se pasará a Liana. Debe ser un bloque futuro anterior a la expiración del ciclado de tu UTXO y a que el recovery path miniscript pueda gastar. Con esta opción activa, Liana mostrará una altura falsa; cualquier tx que construya es no-final hasta esa altura.
+                                </div>
+                            </div>
+                        </div>
                         <div class="setting-group" id="cfg-delay-group">
                             <label data-i18n="cfg_default_delay">Default Delay (hours)</label>
                             <input type="number" id="cfg-default-delay" min="1" max="168">
@@ -1213,6 +1229,10 @@
                 cfg_core_ibd_hint: 'Core is in initial block download, so its tip is behind the network. Schedules are paused to avoid broadcasting against a stale height.',
                 cfg_broadcast_mode: 'Broadcast Mode', cfg_mode_immediate: 'Immediate', cfg_mode_scheduled: 'Scheduled (by time)', cfg_mode_by_block: 'By Block Height',
                 cfg_mode_hint: 'Wallet transactions are retained in the virtual mempool; the scheduler broadcasts per this mode',
+                cfg_liana_vb_tick: 'Schedule Liana UTXO cycling',
+                cfg_liana_vb_height: 'Virtual block height',
+                cfg_liana_vb_warn: 'Enter the virtual block height that will be passed to Liana. It must be a future block, before your UTXO cycling expires and before the miniscript recovery path can spend. With this on, Liana shows a false height; any tx it builds is non-final until that height.',
+                cfg_liana_vb_approx: 'approx.',
                 cfg_scheduled_datetime: 'Scheduled Date & Time (optional)',
                 cfg_scheduled_hint: 'If set, overrides delay. Leave empty to use random delay hours',
                 cfg_clear: 'Clear',
@@ -1335,6 +1355,10 @@
                 cfg_core_ibd_hint: 'Core está en descarga inicial de bloques, así que su punta va por detrás de la red. Las programaciones están en pausa para no difundir contra una altura obsoleta.',
                 cfg_broadcast_mode: 'Modo de Transmisi\u00f3n', cfg_mode_immediate: 'Inmediato', cfg_mode_scheduled: 'Programada (por tiempo)', cfg_mode_by_block: 'Por Altura de Bloque',
                 cfg_mode_hint: 'Las TX de la wallet se retienen en el mempool virtual; el scheduler transmite seg\u00fan este modo',
+                cfg_liana_vb_tick: 'Programar ciclado UTXO de Liana',
+                cfg_liana_vb_height: 'Altura de bloque virtual',
+                cfg_liana_vb_warn: 'Introduce la altura de bloque virtual que se pasar\u00e1 a Liana. Debe ser un bloque futuro anterior a la expiraci\u00f3n del ciclado de tu UTXO y a que el recovery path miniscript pueda gastar. Con esta opci\u00f3n activa, Liana mostrar\u00e1 una altura falsa; cualquier tx que construya es no-final hasta esa altura.',
+                cfg_liana_vb_approx: 'aprox.',
                 cfg_scheduled_datetime: 'Fecha y Hora Programada (opcional)',
                 cfg_scheduled_hint: 'Si se define, anula el retraso. Dejar vac\u00edo para usar horas aleatorias',
                 cfg_clear: 'Limpiar',
@@ -2282,6 +2306,25 @@
                 scheduledGroup.style.display = 'none';
                 delayGroup.style.display = 'none';
             }
+            const lianaGrp = document.getElementById('cfg-liana-vb-group');
+            if (lianaGrp) lianaGrp.style.display = (mode === 'scheduled') ? 'block' : 'none';
+        }
+
+        function toggleLianaVb() {
+            const on = document.getElementById('cfg-liana-vb-enabled').checked;
+            document.getElementById('cfg-liana-vb-fields').style.display = on ? 'block' : 'none';
+            if (on) updateLianaVbDate();
+        }
+
+        // ~10 min/block from the current tip → approximate calendar date of the virtual height.
+        function updateLianaVbDate() {
+            const el = document.getElementById('cfg-liana-vb-date');
+            const target = parseInt(document.getElementById('cfg-liana-vb-height').value, 10);
+            const tip = window.__realTipHeight || 0;
+            if (!target || !tip || target <= tip) { el.textContent = ' '; return; }
+            const mins = (target - tip) * 10;
+            const when = new Date(Date.now() + mins * 60000);
+            el.textContent = `≈ ${t('cfg_liana_vb_approx')} ${when.toLocaleString('es-ES', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'})} (block #${target})`;
         }
 
         function copyWalletUrl(elementId) {
@@ -2350,6 +2393,9 @@
                 const cfg = await (await fetch('/api/config')).json();
                 applyIndexerConfig(cfg);
                 document.getElementById('cfg-broadcast-mode').value = cfg.broadcast_mode || 'immediate';
+                document.getElementById('cfg-liana-vb-enabled').checked = !!cfg.liana_vb_enabled;
+                if (cfg.liana_vb_target_height) document.getElementById('cfg-liana-vb-height').value = cfg.liana_vb_target_height;
+                toggleLianaVb();
                 document.getElementById('cfg-default-delay').value = cfg.default_delay_hours || 24;
                 if (cfg.scheduled_datetime) {
                     document.getElementById('cfg-scheduled-datetime').value = cfg.scheduled_datetime;
@@ -2412,6 +2458,7 @@
 
                     // Height and MTP come from whichever source is live, so they must keep
                     // updating while the indexer is down — that is the whole point of the fallback.
+                    window.__realTipHeight = status.chain_height || window.__realTipHeight || 0;
                     if (status.chain_height) {
                         let heightText = `Block height: ${status.chain_height}`;
                         if (status.chain_mtp) {
@@ -2518,6 +2565,8 @@
                     indexer_url: appUmbrelMode ? '' : document.getElementById('cfg-electrs').value,
                     indexer_use_ssl: indexerSslChecked(),
                     broadcast_mode: document.getElementById('cfg-broadcast-mode').value,
+                    liana_vb_enabled: document.getElementById('cfg-liana-vb-enabled').checked,
+                    liana_vb_target_height: parseInt(document.getElementById('cfg-liana-vb-height').value, 10) || 0,
                     default_delay_hours: parseInt(document.getElementById('cfg-default-delay').value) || 24,
                     scheduled_datetime: document.getElementById('cfg-scheduled-datetime').value || null,
                     min_delay_hours: parseInt(document.getElementById('cfg-min-delay').value),
