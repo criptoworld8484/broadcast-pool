@@ -2243,6 +2243,13 @@ fn resolve_ingest_plan(
     config: &Config,
 ) -> (BroadcastMode, Option<chrono::DateTime<chrono::Utc>>) {
     if source_label == "liana" {
+        let vb = &config.schedule.liana_virtual_block;
+        // Armed virtual block + a by-height nLockTime = the user's UTXO-cycling intent: hold as
+        // by_block targeting that height, not manual. is_locktime_satisfied still gates broadcast.
+        if vb.enabled && nlocktime > 0 && nlocktime <= 500_000_000 {
+            tracing::info!("Liana virtual-block ingest → by_block target {}", nlocktime);
+            return (BroadcastMode::ByBlock, None);
+        }
         tracing::info!("Liana ingest → manual scheduling (pending until user sets date/price)");
         return (BroadcastMode::Manual, None);
     }
@@ -2350,6 +2357,21 @@ fn handle_broadcast(
         let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
         resolve_ingest_plan(source_label, nlocktime, &cfg)
     };
+
+    // After capturing a Liana virtual-block tx, advance the served height by +2 so the next
+    // Liana tx gets a distinct, higher locktime (decorrelation). Persist so it survives restart.
+    if broadcast_mode == BroadcastMode::ByBlock && source_label == "liana" {
+        let mut cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+        if cfg.schedule.liana_virtual_block.enabled {
+            cfg.schedule.liana_virtual_block.target_height =
+                cfg.schedule.liana_virtual_block.target_height.saturating_add(2);
+            let snapshot = cfg.clone();
+            drop(cfg);
+            if let Err(e) = crate::discovery::save_config_to_disk(&snapshot) {
+                tracing::warn!("Failed to persist advanced virtual-block height: {}", e);
+            }
+        }
+    }
 
     tracing::info!(
         "Broadcast plan: source={}, mode={}, scheduled={:?}, nlocktime={}",
@@ -2598,6 +2620,25 @@ mod tests {
         .expect("test config");
         let (mode, _) = resolve_ingest_plan("sparrow", 900_000, &cfg);
         assert_eq!(mode, BroadcastMode::ByBlock);
+    }
+
+    #[test]
+    fn armed_liana_height_locktime_becomes_by_block() {
+        let mut cfg = Config::default_config();
+        cfg.schedule.liana_virtual_block.enabled = true;
+        cfg.schedule.liana_virtual_block.target_height = 950430;
+
+        // Liana tx with a by-height nLockTime, armed → by_block.
+        let (mode, sched) = resolve_ingest_plan("liana", 950430, &cfg);
+        assert_eq!(mode, BroadcastMode::ByBlock);
+        assert!(sched.is_none());
+    }
+
+    #[test]
+    fn disarmed_liana_height_locktime_stays_manual() {
+        let cfg = Config::default_config(); // liana_virtual_block disarmed by default
+        let (mode, _) = resolve_ingest_plan("liana", 950430, &cfg);
+        assert_eq!(mode, BroadcastMode::Manual);
     }
 
     #[test]
