@@ -966,18 +966,29 @@ fn virtual_tip_height(cfg: &Config, is_liana: bool) -> Option<u64> {
     }
 }
 
+/// True only when `height` falls inside the armed virtual range, i.e. `virtual_tip` is `Some`
+/// and `height <= virtual_tip`. Used to clamp fabrication so a client can't request an
+/// unbounded height (which would otherwise blow up `fabricate_headers`'s allocation/loop).
+fn virtual_header_in_range(height: u64, virtual_tip: Option<u64>) -> bool {
+    matches!(virtual_tip, Some(vtip) if height <= vtip)
+}
+
 /// Answer `blockchain.block.header` (single) for a Liana virtual height above the real tip.
-/// Heights at/below the real tip, and `block.headers` ranges, return None → normal forwarding.
+/// Heights at/below the real tip, heights above the armed virtual tip, and `block.headers`
+/// ranges, all return None → normal forwarding.
 fn serve_virtual_block_header(
     request: &JsonRpcRequest,
     pool_manager: &Arc<PoolManager>,
-    _virtual_tip: Option<u64>,
+    virtual_tip: Option<u64>,
 ) -> Option<serde_json::Value> {
     if request.method != "blockchain.block.header" {
         return None; // block.headers ranges: forward for now (Liana backfills via subscribe).
     }
     let params = request.params.as_ref()?.as_array()?;
     let height = params.first()?.as_u64()?;
+    if !virtual_header_in_range(height, virtual_tip) {
+        return None; // out of the armed virtual range: forward normally.
+    }
     let (real_h, real_hex) = pool_manager.get_cached_chain_tip()?;
     match virtual_headers::header_hex_at(real_h, &real_hex, height) {
         Ok(Some(hex)) => Some(serde_json::json!({
@@ -1011,7 +1022,7 @@ async fn handle_headers_subscribe(
                         "id": request.id
                     }));
                 }
-                Ok(None) => {} // vtip <= real tip: fall through to the real tip below.
+                Ok(None) => {} // unreachable here since up_to = vtip.max(real_h + 1) > real_h; kept for header_hex_at's general contract.
                 Err(e) => tracing::warn!("virtual header fabrication failed: {}", e),
             }
         }
@@ -2484,6 +2495,23 @@ mod tests {
         // Disarmed → nothing.
         cfg.schedule.liana_virtual_block.enabled = false;
         assert_eq!(virtual_tip_height(&cfg, true), None);
+    }
+
+    // DoS guard: a client can't request a height beyond the operator-armed virtual tip and
+    // trigger an unbounded allocation/loop in `fabricate_headers`.
+    #[test]
+    fn virtual_header_in_range_clamps_to_armed_tip() {
+        // Above the virtual tip → out of range, must forward normally instead of fabricating.
+        assert!(!virtual_header_in_range(950431, Some(950430)));
+        assert!(!virtual_header_in_range(u64::MAX, Some(950430)));
+
+        // At or below the virtual tip → in range.
+        assert!(virtual_header_in_range(950430, Some(950430)));
+        assert!(virtual_header_in_range(1, Some(950430)));
+
+        // Disarmed (no virtual tip) → never in range.
+        assert!(!virtual_header_in_range(1, None));
+        assert!(!virtual_header_in_range(0, None));
     }
 
     #[test]
