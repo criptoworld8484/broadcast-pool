@@ -437,6 +437,10 @@ async fn main() -> Result<()> {
 
     let pool_manager = Arc::new(PoolManager::new(db.clone(), rpc.clone(), indexer.clone(), shared_config.clone()));
 
+    // Resolve the chain source before the first scheduler tick, so it never runs on an unpolled
+    // snapshot.
+    pool_manager.refresh_chain_health();
+
     match pool_manager.load_pending_from_db() {
         Ok(count) => {
             if count > 0 {

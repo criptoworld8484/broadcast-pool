@@ -4,9 +4,10 @@ use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
 use crate::config::Config;
-use crate::pool::manager::PoolManager;
+use crate::pool::manager::{PoolManager, NO_CHAIN_SOURCE};
 
 const BROADCAST_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct Scheduler {
     pool_manager: Arc<PoolManager>,
@@ -44,8 +45,11 @@ impl Scheduler {
                     }
                 }
                 Ok(Err(e)) => {
-                    if e.to_string().contains("indexer unavailable") {
-                        tracing::warn!("Indexer unavailable, backing off for {:?}", backoff);
+                    if e.to_string().contains(NO_CHAIN_SOURCE) {
+                        tracing::warn!(
+                            "No chain data source (indexer and Bitcoin Core both unusable), backing off for {:?}",
+                            backoff
+                        );
                         sleep(backoff).await;
                         backoff = (backoff * 2).min(max_backoff);
                     } else {
@@ -76,7 +80,7 @@ impl Scheduler {
                     config.network.network_type.data_dir_name().to_string()
                 };
 
-                if !pool_manager.indexer_healthy() {
+                if !pool_manager.chain_clock_available() {
                     return Ok(());
                 }
 
@@ -133,7 +137,7 @@ impl Scheduler {
         loop {
             let pool_manager = self.pool_manager.clone();
             let tick = tokio::task::spawn_blocking(move || {
-                if !pool_manager.indexer_healthy() {
+                if !pool_manager.chain_clock_available() {
                     return Ok(Vec::new());
                 }
                 pool_manager.rebroadcast_pending()
@@ -164,7 +168,7 @@ impl Scheduler {
         loop {
             let pool_manager = self.pool_manager.clone();
             let tick = tokio::task::spawn_blocking(move || {
-                if !pool_manager.indexer_healthy() {
+                if !pool_manager.chain_clock_available() {
                     return Ok(Vec::new());
                 }
                 pool_manager.check_confirmations()
@@ -232,7 +236,38 @@ impl Scheduler {
         }
     }
 
+    /// Keeps the chain-health snapshot fresh so the other loops never pay a blocking probe.
+    /// Polls Bitcoin Core even while the indexer is healthy, so the dashboard can tell the user
+    /// whether the fallback is actually ready *before* it is needed.
+    pub async fn run_health_poller(&self) -> Result<()> {
+        tracing::info!(
+            "Starting chain health poller (interval: {}s)",
+            HEALTH_POLL_INTERVAL.as_secs()
+        );
+
+        loop {
+            sleep(HEALTH_POLL_INTERVAL).await;
+
+            let pool_manager = self.pool_manager.clone();
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || pool_manager.refresh_chain_health()).await
+            {
+                tracing::error!("Chain health poller task failed: {}", e);
+            }
+        }
+    }
+
     pub async fn start_all_loops(&self) -> Result<()> {
+        let pool_manager = self.pool_manager.clone();
+        let config = self.config.clone();
+
+        tokio::spawn(async move {
+            let scheduler = Scheduler::new(pool_manager, config);
+            if let Err(e) = scheduler.run_health_poller().await {
+                tracing::error!("Chain health poller error: {}", e);
+            }
+        });
+
         let pool_manager = self.pool_manager.clone();
         let config = self.config.clone();
 

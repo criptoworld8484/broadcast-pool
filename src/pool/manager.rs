@@ -2,15 +2,21 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::db::models::*;
 use crate::db::Database;
+use crate::pool::chain_health::{decide_chain_source, ChainHealth, ChainSource};
 use crate::price::PriceFeed;
 use crate::rpc::BitcoinRpc;
 use crate::rpc::ElectrumClient;
+
+/// Error emitted by the scheduler tick when neither the indexer nor Bitcoin Core can serve a
+/// block height. Matched by the broadcast loop to decide whether to back off.
+pub const NO_CHAIN_SOURCE: &str = "no chain data source available";
 
 #[derive(Clone)]
 pub struct PendingTxOutput {
@@ -41,6 +47,11 @@ pub struct PoolManager {
     mtp_cache: Arc<Mutex<Option<(Instant, u64)>>>,
     /// Last successful `blockchain.headers.subscribe` from electrs (height, header hex).
     cached_chain_tip: Arc<Mutex<Option<(u64, String)>>>,
+    /// Which backend the chain clock is reading from. Refreshed by the health poller, read
+    /// (without I/O) by the scheduler gates and `/api/status`.
+    chain_health: Arc<RwLock<ChainHealth>>,
+    /// Keeps concurrent `refresh_chain_health()` calls from stacking probes.
+    health_refresh_in_flight: Arc<AtomicBool>,
     price_feed: PriceFeed,
     /// Broadcast channel for scripthash state changes (virtual mempool add/remove).
     scripthash_notifications: tokio::sync::broadcast::Sender<ScripthashNotification>,
@@ -62,6 +73,8 @@ impl PoolManager {
             pending_txs: Arc::new(Mutex::new(HashMap::new())),
             mtp_cache: Arc::new(Mutex::new(None)),
             cached_chain_tip: Arc::new(Mutex::new(None)),
+            chain_health: Arc::new(RwLock::new(ChainHealth::default())),
+            health_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             price_feed: PriceFeed::new(),
             scripthash_notifications,
         }
@@ -227,12 +240,17 @@ impl PoolManager {
 
     pub fn broadcast_transaction(&self, tx_hex: &str) -> Result<String> {
         let mut indexer_err = None;
-        if let Some(indexer) = self.get_indexer() {
-            match indexer.broadcast_transaction(tx_hex) {
-                Ok(txid) => return Ok(txid),
-                Err(e) => {
-                    tracing::warn!("Indexer broadcast failed: {}, trying RPC...", e);
-                    indexer_err = Some(e);
+        // A broadcast error does not imply the indexer is down (it may be alive and rejecting the
+        // tx as non-final or duplicate), so this only skips an already-known-dead one — it never
+        // demotes the indexer on its own.
+        if self.chain_health().should_try_indexer() {
+            if let Some(indexer) = self.get_indexer() {
+                match indexer.broadcast_transaction(tx_hex) {
+                    Ok(txid) => return Ok(txid),
+                    Err(e) => {
+                        tracing::warn!("Indexer broadcast failed: {}, trying RPC...", e);
+                        indexer_err = Some(e);
+                    }
                 }
             }
         }
@@ -564,8 +582,10 @@ impl PoolManager {
             serde_json::json!({}),
         );
         // #endregion
-        if !self.indexer_healthy() {
-            anyhow::bail!("indexer unavailable");
+        // The scheduler needs a height and an MTP, not the address index — so Bitcoin Core alone
+        // is enough to keep honouring schedules while electrs/Fulcrum is down.
+        if !self.chain_clock_available() {
+            anyhow::bail!(NO_CHAIN_SOURCE);
         }
 
         let network = {
@@ -597,13 +617,24 @@ impl PoolManager {
     }
 
     fn get_median_time_past(&self) -> Result<u64> {
+        // Core's `mediantime` is the authoritative BIP-113 value, so it wins whenever the node
+        // answers. No pre-flight `test_connection()`: that was a second getblockchaininfo per call.
         if let Some(ref rpc) = self.rpc {
-            if rpc.test_connection().unwrap_or(false) {
-                return rpc.get_median_time();
+            match rpc.get_median_time() {
+                Ok(mtp) => return Ok(mtp),
+                Err(e) => tracing::debug!("RPC median time failed: {}", e),
             }
         }
-        if let Some(indexer) = self.get_indexer() {
-            return indexer.get_median_time_past();
+        if self.chain_health().should_try_indexer() {
+            if let Some(indexer) = self.get_indexer() {
+                match indexer.get_median_time_past() {
+                    Ok(mtp) => return Ok(mtp),
+                    Err(e) => {
+                        tracing::debug!("Indexer median time failed: {}", e);
+                        self.note_indexer_failure();
+                    }
+                }
+            }
         }
         anyhow::bail!("No backend available to read median time past")
     }
@@ -613,7 +644,9 @@ impl PoolManager {
     }
 
     pub fn get_median_time_past_cached(&self) -> Result<u64> {
-        const TTL: Duration = Duration::from_secs(10);
+        // Matches the health poller interval. MTP only advances with a new block (~10 min) and is
+        // monotonic non-decreasing, so a stale value can only delay a broadcast, never fire one early.
+        const TTL: Duration = Duration::from_secs(30);
         if let Ok(cache) = self.mtp_cache.lock() {
             if let Some((fetched_at, mtp)) = *cache {
                 if fetched_at.elapsed() < TTL {
@@ -957,21 +990,141 @@ impl PoolManager {
         Ok(())
     }
 
-    pub fn indexer_healthy(&self) -> bool {
-        if let Some(indexer) = self.get_indexer() {
-            indexer.test_connection().unwrap_or(false)
-        } else if let Some(ref rpc) = self.rpc {
-            rpc.test_connection().unwrap_or(false)
-        } else {
-            false
+    /// Snapshot of the chain-clock health. Pure cache read, no I/O — safe on every tick.
+    pub fn chain_health(&self) -> ChainHealth {
+        self.chain_health
+            .read()
+            .map(|h| h.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn chain_source(&self) -> ChainSource {
+        self.chain_health().source
+    }
+
+    /// True when either the indexer or a synced Bitcoin Core can serve height and MTP.
+    pub fn chain_clock_available(&self) -> bool {
+        self.chain_health().clock_available()
+    }
+
+    fn write_chain_health(&self, f: impl FnOnce(&mut ChainHealth)) {
+        if let Ok(mut health) = self.chain_health.write() {
+            f(&mut health);
+            health.source =
+                decide_chain_source(health.indexer_up, health.core_up, health.core_ibd);
         }
     }
 
+    /// Demote the indexer the moment a data path sees it fail, instead of waiting up to a full
+    /// poll interval. Failing fast here is what keeps a dead indexer from being retried.
+    pub fn note_indexer_failure(&self) {
+        let was_up = self.chain_health().indexer_up;
+        self.write_chain_health(|h| {
+            h.indexer_up = false;
+            h.polled = true;
+        });
+        if was_up {
+            tracing::warn!("Indexer marked down; chain source is now {:?}", self.chain_source());
+        }
+    }
+
+    pub fn note_indexer_success(&self, height: u64) {
+        self.write_chain_health(|h| {
+            h.indexer_up = true;
+            h.polled = true;
+            h.height = Some(height);
+        });
+    }
+
+    /// Probe both backends and refresh the snapshot. The single writer; called by the health
+    /// poller every 30s and once synchronously at startup.
+    pub fn refresh_chain_health(&self) {
+        if self.health_refresh_in_flight.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let core = self.rpc.as_ref().and_then(|rpc| match rpc.get_chain_status() {
+            Ok(status) => Some(status),
+            Err(e) => {
+                tracing::debug!("Bitcoin Core chain status failed: {}", e);
+                None
+            }
+        });
+
+        let indexer_height = self.get_indexer().and_then(|ix| match ix.get_block_height() {
+            Ok(height) => Some(height),
+            Err(e) => {
+                tracing::debug!("Indexer height probe failed: {}", e);
+                None
+            }
+        });
+
+        // The software name never changes while a server is up, so ask only once per live indexer
+        // rather than on every 30s poll.
+        let indexer_software = if indexer_height.is_some() && self.chain_health().indexer_software.is_none() {
+            self.get_indexer().and_then(|ix| ix.server_software().ok().flatten())
+        } else {
+            None
+        };
+
+        let (core_up, core_ibd, core_sync_pct, core_height, core_mtp) = match core {
+            Some((height, mtp, ibd, pct)) => (true, ibd, Some(pct), Some(height), Some(mtp)),
+            None => (false, false, None, None, None),
+        };
+
+        self.write_chain_health(|h| {
+            h.indexer_up = indexer_height.is_some();
+            // Keep the last known name while it is down: the degraded banner names the server the
+            // user has to go and check ("your Fulcrum at 10.21.21.9:50002"), which is only useful
+            // if we still remember which one it was. The UI never presents it as live.
+            if let Some(ref name) = indexer_software {
+                h.indexer_software = Some(name.clone());
+            }
+            h.core_up = core_up;
+            h.core_ibd = core_ibd;
+            h.core_sync_pct = core_sync_pct;
+            // Prefer the indexer's height when it is alive; it is what the wallet sees too.
+            h.height = indexer_height.or(core_height);
+            h.mtp = core_mtp.or(h.mtp);
+            h.polled = true;
+        });
+
+        // Core's `mediantime` is the authoritative BIP-113 MTP, so warm the cache with it and
+        // spare the data paths an 11-header walk against the indexer.
+        if let Some(mtp) = core_mtp {
+            if let Ok(mut cache) = self.mtp_cache.lock() {
+                *cache = Some((Instant::now(), mtp));
+            }
+        }
+
+        let health = self.chain_health();
+        tracing::info!(
+            "chain health: source={:?} indexer_up={} core_up={} core_ibd={} height={:?}",
+            health.source,
+            health.indexer_up,
+            health.core_up,
+            health.core_ibd,
+            health.height
+        );
+
+        self.health_refresh_in_flight.store(false, Ordering::SeqCst);
+    }
+
     pub fn check_block_height(&self) -> Result<Option<u64>> {
-        if let Some(indexer) = self.get_indexer() {
-            match indexer.get_block_height() {
-                Ok(height) => return Ok(Some(height)),
-                Err(e) => tracing::debug!("Indexer get_height failed: {}", e),
+        // Skip a known-dead indexer: probing it re-resolves every candidate URL (tcp and ssl) and
+        // costs a full connect timeout on each call.
+        if self.chain_health().should_try_indexer() {
+            if let Some(indexer) = self.get_indexer() {
+                match indexer.get_block_height() {
+                    Ok(height) => {
+                        self.note_indexer_success(height);
+                        return Ok(Some(height));
+                    }
+                    Err(e) => {
+                        tracing::debug!("Indexer get_height failed: {}", e);
+                        self.note_indexer_failure();
+                    }
+                }
             }
         }
         if let Some(ref rpc) = self.rpc {
@@ -1253,6 +1406,37 @@ mod tests {
         let db = Arc::new(Database::open(&dir.path().join("test.db")).expect("db open"));
         let config = Arc::new(Mutex::new(Config::default_config()));
         (PoolManager::new(db, None, None, config), dir)
+    }
+
+    // With neither an indexer nor Bitcoin Core, there is no chain clock: the tick must refuse to
+    // run rather than silently do nothing, so the broadcast loop can back off and the dashboard
+    // can tell the user schedules are paused.
+    #[test]
+    fn no_backend_means_no_chain_clock() {
+        let (pm, _dir) = test_manager();
+        pm.refresh_chain_health();
+
+        assert_eq!(pm.chain_source(), ChainSource::None);
+        assert!(!pm.chain_clock_available());
+
+        let err = pm.run_scheduler_tick().expect_err("tick must refuse without a chain source");
+        assert!(err.to_string().contains(NO_CHAIN_SOURCE));
+    }
+
+    // A data path that sees the indexer fail must demote it immediately, or every later call keeps
+    // paying the full connect timeout until the next 30s poll.
+    #[test]
+    fn indexer_failure_demotes_the_snapshot() {
+        let (pm, _dir) = test_manager();
+        pm.note_indexer_success(900_000);
+        assert!(pm.chain_health().indexer_up);
+        assert_eq!(pm.chain_source(), ChainSource::Indexer);
+
+        pm.note_indexer_failure();
+        let health = pm.chain_health();
+        assert!(!health.indexer_up);
+        assert!(!health.should_try_indexer());
+        assert_eq!(health.source, ChainSource::None);
     }
 
     // After the pre-ack output-only store, input (spending) scripthashes are resolved
