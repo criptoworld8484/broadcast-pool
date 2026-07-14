@@ -966,6 +966,15 @@ fn virtual_tip_height(cfg: &Config, is_liana: bool) -> Option<u64> {
     }
 }
 
+/// Whether the warm-cache instant-answer fast path for `blockchain.headers.subscribe` may be
+/// used for this session. It must NOT be used for an armed Liana session — that session needs
+/// to fall through to the normal dispatch path so the fabricated virtual tip is served instead
+/// of the real cached tip. Everyone else (Sparrow, or a disarmed/unenrolled Liana) keeps the
+/// fast path unchanged.
+fn should_use_instant_headers_cache(is_liana: bool, cfg: &Config) -> bool {
+    virtual_tip_height(cfg, is_liana).is_none()
+}
+
 /// True only when `height` falls inside the armed virtual range, i.e. `virtual_tip` is `Some`
 /// and `height <= virtual_tip`. Used to clamp fabrication so a client can't request an
 /// unbounded height (which would otherwise blow up `fabricate_headers`'s allocation/loop).
@@ -1863,25 +1872,35 @@ async fn process_client_line(
     }
 
     // Instant headers.subscribe when cache is warm (Sparrow Test Connection).
+    // Skipped for an armed Liana session: it must fall through to the normal dispatch path
+    // (handle_one_subrequest → handle_headers_subscribe) so the fabricated virtual tip is
+    // served instead of the real cached tip.
     if let Ok(reqs) = parse_subrequests(line_str) {
         if reqs.len() == 1 && reqs[0].method == "blockchain.headers.subscribe" {
-            if let Some((height, hex)) = pool_manager.get_cached_chain_tip() {
-                spawn_chain_tip_refresh(indexer_url, pool_manager);
-                write_json_rpc_response(
-                    client_stream,
-                    &serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "result": { "height": height, "hex": hex },
-                        "id": reqs[0].id
-                    }),
-                )
-                .await?;
-                tracing::info!(
-                    "Electrum RPC from {}: [blockchain.headers.subscribe] (instant cache height={})",
-                    peer_addr,
-                    height
-                );
-                return Ok(());
+            let is_liana = session.effective_source(source_label) == "liana";
+            let use_instant_cache = {
+                let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+                should_use_instant_headers_cache(is_liana, &cfg)
+            };
+            if use_instant_cache {
+                if let Some((height, hex)) = pool_manager.get_cached_chain_tip() {
+                    spawn_chain_tip_refresh(indexer_url, pool_manager);
+                    write_json_rpc_response(
+                        client_stream,
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "result": { "height": height, "hex": hex },
+                            "id": reqs[0].id
+                        }),
+                    )
+                    .await?;
+                    tracing::info!(
+                        "Electrum RPC from {}: [blockchain.headers.subscribe] (instant cache height={})",
+                        peer_addr,
+                        height
+                    );
+                    return Ok(());
+                }
             }
         }
     }
@@ -2246,7 +2265,7 @@ fn resolve_ingest_plan(
         let vb = &config.schedule.liana_virtual_block;
         // Armed virtual block + a by-height nLockTime = the user's UTXO-cycling intent: hold as
         // by_block targeting that height, not manual. is_locktime_satisfied still gates broadcast.
-        if vb.enabled && nlocktime > 0 && nlocktime <= 500_000_000 {
+        if vb.enabled && nlocktime > 0 && nlocktime < 500_000_000 {
             tracing::info!("Liana virtual-block ingest → by_block target {}", nlocktime);
             return (BroadcastMode::ByBlock, None);
         }
@@ -2517,6 +2536,23 @@ mod tests {
         // Disarmed → nothing.
         cfg.schedule.liana_virtual_block.enabled = false;
         assert_eq!(virtual_tip_height(&cfg, true), None);
+    }
+
+    #[test]
+    fn instant_headers_cache_skipped_only_for_armed_liana() {
+        let mut cfg = Config::default_config();
+        cfg.schedule.liana_virtual_block.enabled = true;
+        cfg.schedule.liana_virtual_block.target_height = 950430;
+
+        // Armed Liana: fast path must be skipped so the virtual dispatch path is used instead.
+        assert!(!should_use_instant_headers_cache(true, &cfg));
+
+        // Sparrow (even with the feature armed for Liana): fast path unchanged.
+        assert!(should_use_instant_headers_cache(false, &cfg));
+
+        // Disarmed Liana: fast path unchanged.
+        cfg.schedule.liana_virtual_block.enabled = false;
+        assert!(should_use_instant_headers_cache(true, &cfg));
     }
 
     // DoS guard: a client can't request a height beyond the operator-armed virtual tip and

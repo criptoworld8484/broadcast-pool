@@ -147,8 +147,14 @@ fn live_test_indexer_url(url: &str, network: &crate::config::NetworkType) -> boo
     crate::discovery::resolve_working_indexer_url(url, network).is_some()
 }
 
+/// Maximum allowed gap between the real chain tip and an armed virtual target height
+/// (~100_000 blocks, roughly 2 years). Bounds the header-fabrication allocation/loop
+/// triggered on every armed Liana subscribe.
+const MAX_VIRTUAL_BLOCK_GAP: u64 = 100_000;
+
 /// A virtual block height must be a real future block. Reject 0 (unset) and anything at/below
-/// the current tip (it would be non-final immediately, defeating the point).
+/// the current tip (it would be non-final immediately, defeating the point), and anything
+/// unreasonably far in the future (would force fabricating an enormous header range).
 fn validate_virtual_height(target: u64, real_height: Option<u64>) -> Result<(), String> {
     if target == 0 {
         return Err("Introduce una altura de bloque virtual futura.".into());
@@ -158,6 +164,12 @@ fn validate_virtual_height(target: u64, real_height: Option<u64>) -> Result<(), 
             return Err(format!(
                 "La altura virtual {} debe ser mayor que la altura actual {}.",
                 target, h
+            ));
+        }
+        if target > h + MAX_VIRTUAL_BLOCK_GAP {
+            return Err(format!(
+                "La altura virtual {} está demasiado lejos de la actual {} (máximo +{}).",
+                target, h, MAX_VIRTUAL_BLOCK_GAP
             ));
         }
     }
@@ -627,12 +639,18 @@ async fn save_config(
     }
     if let Some(enable) = req.liana_vb_enabled {
         if enable {
+            let Some(armed_at) = real_height else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Altura de la cadena no disponible; reintenta en unos segundos.".into(),
+                ));
+            };
             validate_virtual_height(
                 config.schedule.liana_virtual_block.target_height,
                 real_height,
             )
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-            config.schedule.liana_virtual_block.armed_at_height = real_height.unwrap_or(0);
+            config.schedule.liana_virtual_block.armed_at_height = armed_at;
             config.schedule.liana_virtual_block.enabled = true;
             tracing::info!(
                 "Liana virtual block armed: target={} armed_at={}",
@@ -1046,5 +1064,18 @@ mod tests {
         assert!(validate_virtual_height(90, Some(100)).is_err()); // below tip
         assert!(validate_virtual_height(150, Some(100)).is_ok()); // future
         assert!(validate_virtual_height(150, None).is_ok()); // no height known → allow
+    }
+
+    #[test]
+    fn virtual_height_gap_is_capped() {
+        let real = 100u64;
+        // Within the allowed gap → Ok.
+        assert!(validate_virtual_height(real + MAX_VIRTUAL_BLOCK_GAP, Some(real)).is_ok());
+        // Just beyond the allowed gap → Err.
+        assert!(validate_virtual_height(real + MAX_VIRTUAL_BLOCK_GAP + 1, Some(real)).is_err());
+        // Absurdly far beyond → Err.
+        assert!(validate_virtual_height(real + 10_000_000, Some(real)).is_err());
+        // No real height known → gap check doesn't apply (existing None => Ok behaviour).
+        assert!(validate_virtual_height(real + 10_000_000, None).is_ok());
     }
 }
