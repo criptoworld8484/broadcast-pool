@@ -126,6 +126,9 @@ fn config_to_response(config: &Config, network_changed: bool) -> ConfigResponse 
         broadcast_mode: config.schedule.broadcast_mode.to_string(),
         default_delay_hours: config.schedule.default_delay_hours,
         scheduled_datetime: config.schedule.scheduled_datetime.clone(),
+        liana_vb_enabled: config.schedule.liana_virtual_block.enabled,
+        liana_vb_target_height: config.schedule.liana_virtual_block.target_height,
+        liana_vb_armed_at_height: config.schedule.liana_virtual_block.armed_at_height,
         min_delay_hours: config.schedule.min_delay_hours,
         max_delay_hours: config.schedule.max_delay_hours,
         min_fee_rate: config.schedule.min_fee_rate,
@@ -142,6 +145,23 @@ fn config_to_response(config: &Config, network_changed: bool) -> ConfigResponse 
 
 fn live_test_indexer_url(url: &str, network: &crate::config::NetworkType) -> bool {
     crate::discovery::resolve_working_indexer_url(url, network).is_some()
+}
+
+/// A virtual block height must be a real future block. Reject 0 (unset) and anything at/below
+/// the current tip (it would be non-final immediately, defeating the point).
+fn validate_virtual_height(target: u64, real_height: Option<u64>) -> Result<(), String> {
+    if target == 0 {
+        return Err("Introduce una altura de bloque virtual futura.".into());
+    }
+    if let Some(h) = real_height {
+        if target <= h {
+            return Err(format!(
+                "La altura virtual {} debe ser mayor que la altura actual {}.",
+                target, h
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn get_stats(State(state): State<AppState>) -> Result<Json<PoolStats>, (StatusCode, String)> {
@@ -410,6 +430,9 @@ struct StatusResponse {
     /// True when electrs is reachable and wallet URL is configured (Umbrel readiness).
     sparrow_ready: bool,
     sparrow_tor_warning: String,
+    liana_vb_enabled: bool,
+    liana_vb_target_height: u64,
+    liana_vb_disarm_height: u64,
 }
 
 #[derive(serde::Serialize, Deserialize)]
@@ -425,6 +448,9 @@ struct ConfigResponse {
     broadcast_mode: String,
     default_delay_hours: u64,
     scheduled_datetime: Option<String>,
+    liana_vb_enabled: bool,
+    liana_vb_target_height: u64,
+    liana_vb_armed_at_height: u64,
     min_delay_hours: u64,
     max_delay_hours: u64,
     min_fee_rate: f64,
@@ -474,6 +500,8 @@ struct SaveConfigRequest {
     max_delay_hours: Option<u64>,
     min_fee_rate: Option<f64>,
     max_fee_rate: Option<f64>,
+    liana_vb_enabled: Option<bool>,
+    liana_vb_target_height: Option<u64>,
 }
 
 async fn save_config(
@@ -481,6 +509,10 @@ async fn save_config(
     Json(req): Json<SaveConfigRequest>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, String)> {
     tracing::info!("save_config called");
+    // Read the live tip BEFORE taking the config lock: chain_health() locks a separate
+    // RwLock, and reading it while holding the config mutex risks a borrow/lock conflict
+    // (and, more importantly, checking order matters for correctness here).
+    let real_height = state.pool_manager.chain_health().height;
     let mut config = state.config.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     tracing::info!("Config lock acquired");
 
@@ -588,6 +620,29 @@ async fn save_config(
     if let Some(v) = req.max_fee_rate {
         config.schedule.max_fee_rate = v;
     }
+
+    // Liana virtual block. Arming validates the height against the live tip and stamps armed_at.
+    if let Some(target) = req.liana_vb_target_height {
+        config.schedule.liana_virtual_block.target_height = target;
+    }
+    if let Some(enable) = req.liana_vb_enabled {
+        if enable {
+            validate_virtual_height(
+                config.schedule.liana_virtual_block.target_height,
+                real_height,
+            )
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            config.schedule.liana_virtual_block.armed_at_height = real_height.unwrap_or(0);
+            config.schedule.liana_virtual_block.enabled = true;
+            tracing::info!(
+                "Liana virtual block armed: target={} armed_at={}",
+                config.schedule.liana_virtual_block.target_height,
+                config.schedule.liana_virtual_block.armed_at_height
+            );
+        } else {
+            config.schedule.liana_virtual_block.enabled = false;
+        }
+    }
     tracing::info!("Config modified");
 
     crate::discovery::save_config_to_disk(&config)
@@ -642,13 +697,35 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
             .as_ref()
             .map(|i| crate::discovery::display_indexer_url(&i.url))
             .unwrap_or_default();
-        Ok::<_, String>((stats, health, network, network_display, wallet_url, indexer_url))
+        let liana_vb_enabled = cfg.schedule.liana_virtual_block.enabled;
+        let liana_vb_target_height = cfg.schedule.liana_virtual_block.target_height;
+        let liana_vb_disarm_height = cfg.schedule.liana_virtual_block.armed_at_height + 10;
+        Ok::<_, String>((
+            stats,
+            health,
+            network,
+            network_display,
+            wallet_url,
+            indexer_url,
+            liana_vb_enabled,
+            liana_vb_target_height,
+            liana_vb_disarm_height,
+        ))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {}", e)))?;
 
-    let (pool_stats, health, network, network_display, wallet_url, indexer_url) =
-        result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (
+        pool_stats,
+        health,
+        network,
+        network_display,
+        wallet_url,
+        indexer_url,
+        liana_vb_enabled,
+        liana_vb_target_height,
+        liana_vb_disarm_height,
+    ) = result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let electrum_connected = health.indexer_up;
 
@@ -680,6 +757,9 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         // folding it in here told the user to go fix the wallet, which is not where the fault is.
         sparrow_ready: !wallet_url.is_empty() && !wallet_url.contains('<'),
         sparrow_tor_warning: "Disable Sparrow Settings→Network proxy/Tor or broadcasts bypass this pool (mempool.space). Use tcp://LAN:50050 only.".into(),
+        liana_vb_enabled,
+        liana_vb_target_height,
+        liana_vb_disarm_height,
     }))
 }
 
@@ -953,4 +1033,18 @@ async fn restart_daemon() -> impl IntoResponse {
     });
     let _ = handle.await;
     "Restarting"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_height_must_be_future() {
+        assert!(validate_virtual_height(0, Some(100)).is_err()); // unset
+        assert!(validate_virtual_height(100, Some(100)).is_err()); // equal to tip
+        assert!(validate_virtual_height(90, Some(100)).is_err()); // below tip
+        assert!(validate_virtual_height(150, Some(100)).is_ok()); // future
+        assert!(validate_virtual_height(150, None).is_ok()); // no height known → allow
+    }
 }
