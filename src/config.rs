@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Optional third-fallback indexer on the LAN (another node), used only when the primary
+    /// indexer AND Bitcoin Core are both unavailable. Distinct from `indexer` (which the External
+    /// Indexer override replaces). "tcp://host:port" / "ssl://host:port".
+    #[serde(default)]
+    pub secondary_indexer: Option<String>,
     pub network: NetworkConfig,
     pub bitcoin_rpc: Option<BitcoinRpcConfig>,
     pub indexer: Option<IndexerConfig>,
@@ -192,6 +197,7 @@ impl Config {
             });
 
         Self {
+            secondary_indexer: None,
             network: NetworkConfig {
                 network_type,
                 resolved_genesis: None,
@@ -506,6 +512,40 @@ mod tests {
             "#;
             let sc: ScheduleConfig = toml::from_str(toml).expect("parse");
             assert!(!sc.liana_virtual_block.enabled);
+        }
+    }
+
+    #[cfg(test)]
+    mod secondary_indexer_tests {
+        use super::super::*;
+
+        #[test]
+        fn secondary_indexer_defaults_none_and_roundtrips() {
+            let mut c = Config::default_config();
+            assert!(c.secondary_indexer.is_none());
+            c.secondary_indexer = Some("tcp://192.168.1.50:50001".to_string());
+            let toml = toml::to_string_pretty(&c).expect("serialize");
+            let back: Config = toml::from_str(&toml).expect("parse");
+            assert_eq!(back.secondary_indexer.as_deref(), Some("tcp://192.168.1.50:50001"));
+        }
+
+        #[test]
+        fn old_config_without_secondary_still_parses() {
+            // A network+pool+privacy minimal config, no secondary_indexer key.
+            let toml = r#"
+                [network]
+                type = "testnet4"
+                [pool]
+                max_size_kb = 300
+                rebroadcast_interval_minutes = 30
+                expiry_days = 14
+                [privacy]
+                use_tor = false
+                tor_socks_port = 9050
+                rotate_identity_per_tx = false
+            "#;
+            let c: Config = toml::from_str(toml).expect("parse");
+            assert!(c.secondary_indexer.is_none());
         }
     }
 }
