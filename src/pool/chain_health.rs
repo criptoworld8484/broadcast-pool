@@ -11,6 +11,7 @@
 pub enum ChainSource {
     Indexer,
     BitcoinCore,
+    SecondaryIndexer,
     None,
 }
 
@@ -27,6 +28,10 @@ pub struct ChainHealth {
     pub source: ChainSource,
     /// False until the first poll completes; callers treat that as "assume healthy".
     pub polled: bool,
+    /// Whether the secondary indexer responded on the last (lazy) probe.
+    pub secondary_up: bool,
+    /// Whether a secondary indexer URL is configured at all.
+    pub secondary_configured: bool,
 }
 
 impl Default for ChainHealth {
@@ -41,6 +46,8 @@ impl Default for ChainHealth {
             indexer_software: None,
             source: ChainSource::None,
             polled: false,
+            secondary_up: false,
+            secondary_configured: false,
         }
     }
 }
@@ -59,11 +66,19 @@ impl ChainHealth {
 
 /// A node still in initial block download reports a validated tip far behind the network, so a
 /// height-locked tx could look due against a stale height. An IBD node is not a chain clock.
-pub fn decide_chain_source(indexer_up: bool, core_up: bool, core_ibd: bool) -> ChainSource {
+/// The secondary indexer is the last resort: only when the primary is down AND Core is unusable.
+pub fn decide_chain_source(
+    indexer_up: bool,
+    core_up: bool,
+    core_ibd: bool,
+    secondary_up: bool,
+) -> ChainSource {
     if indexer_up {
         ChainSource::Indexer
     } else if core_up && !core_ibd {
         ChainSource::BitcoinCore
+    } else if secondary_up {
+        ChainSource::SecondaryIndexer
     } else {
         ChainSource::None
     }
@@ -91,23 +106,34 @@ mod tests {
 
     #[test]
     fn indexer_wins_when_up() {
-        assert_eq!(decide_chain_source(true, true, false), ChainSource::Indexer);
-        assert_eq!(decide_chain_source(true, false, false), ChainSource::Indexer);
+        assert_eq!(decide_chain_source(true, true, false, true), ChainSource::Indexer);
+        assert_eq!(decide_chain_source(true, false, false, false), ChainSource::Indexer);
     }
 
     #[test]
     fn core_takes_over_when_indexer_down() {
-        assert_eq!(decide_chain_source(false, true, false), ChainSource::BitcoinCore);
+        assert_eq!(decide_chain_source(false, true, false, true), ChainSource::BitcoinCore);
     }
 
     #[test]
     fn core_in_ibd_is_not_a_clock() {
-        assert_eq!(decide_chain_source(false, true, true), ChainSource::None);
+        // Core in IBD is skipped; secondary (if up) takes over.
+        assert_eq!(decide_chain_source(false, true, true, true), ChainSource::SecondaryIndexer);
+        assert_eq!(decide_chain_source(false, true, true, false), ChainSource::None);
+    }
+
+    #[test]
+    fn secondary_is_last_resort() {
+        // Only when primary down AND core unusable.
+        assert_eq!(decide_chain_source(false, false, false, true), ChainSource::SecondaryIndexer);
+        // Never over a live primary or synced core.
+        assert_eq!(decide_chain_source(true, false, false, true), ChainSource::Indexer);
+        assert_eq!(decide_chain_source(false, true, false, true), ChainSource::BitcoinCore);
     }
 
     #[test]
     fn nothing_up_means_no_source() {
-        assert_eq!(decide_chain_source(false, false, false), ChainSource::None);
+        assert_eq!(decide_chain_source(false, false, false, false), ChainSource::None);
     }
 
     #[test]

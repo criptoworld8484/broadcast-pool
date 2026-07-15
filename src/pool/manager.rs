@@ -1010,8 +1010,12 @@ impl PoolManager {
     fn write_chain_health(&self, f: impl FnOnce(&mut ChainHealth)) {
         if let Ok(mut health) = self.chain_health.write() {
             f(&mut health);
-            health.source =
-                decide_chain_source(health.indexer_up, health.core_up, health.core_ibd);
+            health.source = decide_chain_source(
+                health.indexer_up,
+                health.core_up,
+                health.core_ibd,
+                health.secondary_up,
+            );
         }
     }
 
