@@ -1079,6 +1079,42 @@ impl PoolManager {
             None => (false, false, None, None, None),
         };
 
+        // Third fallback: probe the secondary indexer only when the primary is down and Core is
+        // unusable. Reads the URL from config; a fresh ElectrumClient per probe (rare path).
+        let secondary_url = {
+            let cfg = self.config.lock().ok();
+            cfg.and_then(|c| c.secondary_indexer.clone())
+        };
+        let secondary_configured = secondary_url.is_some();
+        let indexer_is_up = indexer_height.is_some();
+        let (secondary_up, secondary_height, secondary_mtp) = if should_probe_secondary(
+            indexer_is_up,
+            core_up,
+            core_ibd,
+            secondary_configured,
+        ) {
+            let url = crate::discovery::normalize_indexer_url(secondary_url.as_deref().unwrap_or(""));
+            match ElectrumClient::new(&url) {
+                Ok(client) => match client.get_block_height() {
+                    Ok(h) => {
+                        let mtp = client.get_median_time_past().ok();
+                        tracing::info!("Secondary indexer alive at {} (height {})", url, h);
+                        (true, Some(h), mtp)
+                    }
+                    Err(e) => {
+                        tracing::debug!("Secondary indexer probe failed: {}", e);
+                        (false, None, None)
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!("Secondary indexer client build failed: {}", e);
+                    (false, None, None)
+                }
+            }
+        } else {
+            (false, None, None)
+        };
+
         self.write_chain_health(|h| {
             h.indexer_up = indexer_height.is_some();
             // Keep the last known name while it is down: the degraded banner names the server the
@@ -1090,9 +1126,11 @@ impl PoolManager {
             h.core_up = core_up;
             h.core_ibd = core_ibd;
             h.core_sync_pct = core_sync_pct;
-            // Prefer the indexer's height when it is alive; it is what the wallet sees too.
-            h.height = indexer_height.or(core_height);
-            h.mtp = core_mtp.or(h.mtp);
+            h.secondary_configured = secondary_configured;
+            h.secondary_up = secondary_up;
+            // Prefer the indexer's height, then Core, then the secondary.
+            h.height = indexer_height.or(core_height).or(secondary_height);
+            h.mtp = core_mtp.or(secondary_mtp).or(h.mtp);
             h.polled = true;
         });
 
@@ -1101,6 +1139,13 @@ impl PoolManager {
         if let Some(mtp) = core_mtp {
             if let Ok(mut cache) = self.mtp_cache.lock() {
                 *cache = Some((Instant::now(), mtp));
+            }
+        }
+        if core_mtp.is_none() {
+            if let Some(mtp) = secondary_mtp {
+                if let Ok(mut cache) = self.mtp_cache.lock() {
+                    *cache = Some((Instant::now(), mtp));
+                }
             }
         }
 
@@ -1425,6 +1470,18 @@ fn should_disarm(enabled: bool, armed_at_height: u64, real_height: u64) -> bool 
     enabled && real_height >= armed_at_height + 10
 }
 
+/// The secondary indexer is a last resort: probe it only when the primary is down AND Core cannot
+/// serve the clock (down or in IBD), and only if one is configured. Keeps the external LAN node
+/// untouched while the primary is healthy.
+fn should_probe_secondary(
+    indexer_up: bool,
+    core_up: bool,
+    core_ibd: bool,
+    secondary_configured: bool,
+) -> bool {
+    secondary_configured && !indexer_up && !(core_up && !core_ibd)
+}
+
 fn classify_mempool_congestion(fee_sat_vb: f64, network: &str) -> &'static str {
     let (low_max, high_min) = match network {
         "mainnet" => (10.0, 50.0),
@@ -1522,5 +1579,19 @@ mod tests {
         assert!(!should_disarm(true, 100, 109)); // 9 blocks in → still armed
         assert!(should_disarm(true, 100, 110)); // exactly +10 → disarm
         assert!(should_disarm(true, 100, 130)); // well past → disarm
+    }
+
+    #[test]
+    fn secondary_probed_only_when_primary_down_and_core_unusable() {
+        // Primary up → never probe the external node.
+        assert!(!should_probe_secondary(true, false, false, true));
+        // Primary down but Core synced → Core covers it; don't probe secondary.
+        assert!(!should_probe_secondary(false, true, false, true));
+        // Primary down, Core down → probe secondary (if configured).
+        assert!(should_probe_secondary(false, false, false, true));
+        // Primary down, Core in IBD → probe secondary.
+        assert!(should_probe_secondary(false, true, true, true));
+        // Not configured → never probe.
+        assert!(!should_probe_secondary(false, false, false, false));
     }
 }
