@@ -129,6 +129,7 @@ fn config_to_response(config: &Config, network_changed: bool) -> ConfigResponse 
         liana_vb_enabled: config.schedule.liana_virtual_block.enabled,
         liana_vb_target_height: config.schedule.liana_virtual_block.target_height,
         liana_vb_armed_at_height: config.schedule.liana_virtual_block.armed_at_height,
+        secondary_indexer_url: config.secondary_indexer.clone().unwrap_or_default(),
         min_delay_hours: config.schedule.min_delay_hours,
         max_delay_hours: config.schedule.max_delay_hours,
         min_fee_rate: config.schedule.min_fee_rate,
@@ -145,6 +146,31 @@ fn config_to_response(config: &Config, network_changed: bool) -> ConfigResponse 
 
 fn live_test_indexer_url(url: &str, network: &crate::config::NetworkType) -> bool {
     crate::discovery::resolve_working_indexer_url(url, network).is_some()
+}
+
+/// `extract_indexer_host` only splits on `:` — it happily returns garbage like `"!!!"` as a
+/// "host". Reject anything that isn't plausibly a hostname or IP (alnum plus `.`/`-`/`_`/`:`
+/// for IPv6) so `normalize_secondary_indexer` can actually distinguish real input from noise.
+fn is_plausible_host(host: &str) -> bool {
+    !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+}
+
+/// Normalize a user-entered secondary indexer (IP, host:port, or tcp/ssl URL). Empty → None
+/// (clears it). A value with no resolvable host → Err with a message. Uses the same normalization
+/// as the primary/external indexer so behaviour is consistent.
+fn normalize_secondary_indexer(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let normalized = crate::discovery::normalize_indexer_url(trimmed);
+    match crate::discovery::extract_indexer_host(&normalized) {
+        Some(host) if is_plausible_host(&host) => Ok(Some(normalized)),
+        _ => Err(format!("Dirección de indexador secundario no válida: {}", raw)),
+    }
 }
 
 /// Maximum allowed gap between the real chain tip and an armed virtual target height
@@ -429,6 +455,10 @@ struct StatusResponse {
     chain_height: Option<u64>,
     /// `host:port` of the configured indexer, for the degraded-mode message.
     indexer_url: String,
+    /// `host:port` of the configured secondary (tertiary-fallback) indexer, if any.
+    secondary_indexer_url: String,
+    /// Whether the secondary indexer answered on its last probe.
+    secondary_up: bool,
     /// Indexer software name (`electrs`, `Fulcrum`); `None` until known.
     indexer_software: Option<String>,
     core_ibd: bool,
@@ -463,6 +493,7 @@ struct ConfigResponse {
     liana_vb_enabled: bool,
     liana_vb_target_height: u64,
     liana_vb_armed_at_height: u64,
+    secondary_indexer_url: String,
     min_delay_hours: u64,
     max_delay_hours: u64,
     min_fee_rate: f64,
@@ -514,6 +545,7 @@ struct SaveConfigRequest {
     max_fee_rate: Option<f64>,
     liana_vb_enabled: Option<bool>,
     liana_vb_target_height: Option<u64>,
+    secondary_indexer: Option<String>,
 }
 
 async fn save_config(
@@ -661,6 +693,12 @@ async fn save_config(
             config.schedule.liana_virtual_block.enabled = false;
         }
     }
+
+    if let Some(raw) = req.secondary_indexer {
+        let normalized = normalize_secondary_indexer(&raw)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        config.secondary_indexer = normalized;
+    }
     tracing::info!("Config modified");
 
     crate::discovery::save_config_to_disk(&config)
@@ -715,6 +753,7 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
             .as_ref()
             .map(|i| crate::discovery::display_indexer_url(&i.url))
             .unwrap_or_default();
+        let secondary_indexer_url = cfg.secondary_indexer.clone().unwrap_or_default();
         let liana_vb_enabled = cfg.schedule.liana_virtual_block.enabled;
         let liana_vb_target_height = cfg.schedule.liana_virtual_block.target_height;
         let liana_vb_disarm_height = cfg.schedule.liana_virtual_block.armed_at_height + 10;
@@ -725,6 +764,7 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
             network_display,
             wallet_url,
             indexer_url,
+            secondary_indexer_url,
             liana_vb_enabled,
             liana_vb_target_height,
             liana_vb_disarm_height,
@@ -740,6 +780,7 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         network_display,
         wallet_url,
         indexer_url,
+        secondary_indexer_url,
         liana_vb_enabled,
         liana_vb_target_height,
         liana_vb_disarm_height,
@@ -763,6 +804,8 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         chain_source: health.source,
         chain_height: health.height,
         indexer_url,
+        secondary_indexer_url,
+        secondary_up: health.secondary_up,
         indexer_software: health.indexer_software.clone(),
         core_ibd: health.core_ibd,
         core_sync_pct: health.core_sync_pct,
@@ -1077,5 +1120,16 @@ mod tests {
         assert!(validate_virtual_height(real + 10_000_000, Some(real)).is_err());
         // No real height known → gap check doesn't apply (existing None => Ok behaviour).
         assert!(validate_virtual_height(real + 10_000_000, None).is_ok());
+    }
+
+    #[test]
+    fn secondary_indexer_normalization() {
+        assert_eq!(normalize_secondary_indexer("").unwrap(), None);
+        assert_eq!(normalize_secondary_indexer("   ").unwrap(), None);
+        // IP or host:port normalizes to a tcp:// url with a port.
+        let n = normalize_secondary_indexer("192.168.1.50:50001").unwrap().unwrap();
+        assert!(n.contains("192.168.1.50:50001"), "got {}", n);
+        // Garbage with no host → error.
+        assert!(normalize_secondary_indexer("!!!").is_err());
     }
 }
