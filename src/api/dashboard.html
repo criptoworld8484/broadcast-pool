@@ -864,6 +864,7 @@
                             <tr>
                                 <th data-i18n="pool_th_poolid">Pool ID</th>
                                 <th data-i18n="pool_th_txid">TXID</th>
+                                <th data-i18n="pool_th_source">Source</th>
                                 <th data-i18n="pool_th_status">Status</th>
                                 <th data-i18n="pool_th_type">Type</th>
                                 <th data-i18n="pool_th_scheduled">Scheduled</th>
@@ -871,7 +872,7 @@
                             </tr>
                         </thead>
                         <tbody id="tx-list">
-                            <tr><td colspan="6" class="empty" data-i18n="pool_empty">Loading...</td></tr>
+                            <tr><td colspan="7" class="empty" data-i18n="pool_empty">Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -924,20 +925,20 @@
                                 <option value="by_block" data-i18n="cfg_mode_by_block">By Block Height</option>
                             </select>
                             <div class="setting-hint" data-i18n="cfg_mode_hint">How transactions from your wallet are broadcast</div>
-                        </div>
-                        <div class="setting-group" id="cfg-liana-vb-group" style="display:none;">
-                            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-                                <input type="checkbox" id="cfg-liana-vb-enabled" onchange="toggleLianaVb()">
-                                <span data-i18n="cfg_liana_vb_tick">Programar ciclado UTXO de Liana</span>
-                            </label>
-                            <div id="cfg-liana-vb-fields" style="display:none; margin-top:12px;">
-                                <label data-i18n="cfg_liana_vb_height">Altura de bloque virtual</label>
-                                <input type="number" id="cfg-liana-vb-height" min="1" step="1"
-                                       oninput="updateLianaVbDate()"
-                                       style="width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:16px 20px; border-radius:12px; font-family:var(--font-mono); font-size:16px;">
-                                <div class="setting-hint" id="cfg-liana-vb-date">&nbsp;</div>
-                                <div class="setting-hint" style="color:var(--amber); margin-top:8px;" data-i18n="cfg_liana_vb_warn">
-                                    Introduce la altura de bloque virtual que se pasará a Liana. Debe ser un bloque futuro anterior a la expiración del ciclado de tu UTXO y a que el recovery path miniscript pueda gastar. Con esta opción activa, Liana mostrará una altura falsa; cualquier tx que construya es no-final hasta esa altura.
+                            <div id="cfg-liana-vb-group" style="display:none; margin-top:18px; padding-top:16px; border-top:1px solid var(--border);">
+                                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; letter-spacing:0;">
+                                    <input type="checkbox" id="cfg-liana-vb-enabled" onchange="toggleLianaVb()">
+                                    <span data-i18n="cfg_liana_vb_tick">Programar ciclado UTXO de Liana</span>
+                                </label>
+                                <div id="cfg-liana-vb-fields" style="display:none; margin-top:14px;">
+                                    <label data-i18n="cfg_liana_vb_height">Altura de bloque virtual</label>
+                                    <input type="number" id="cfg-liana-vb-height" min="1" step="1"
+                                           oninput="updateLianaVbDate()"
+                                           style="width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:16px 20px; border-radius:12px; font-family:var(--font-mono); font-size:16px;">
+                                    <div class="setting-hint" id="cfg-liana-vb-date">&nbsp;</div>
+                                    <div class="setting-hint" style="color:var(--amber); margin-top:8px;" data-i18n="cfg_liana_vb_warn">
+                                        Introduce la altura de bloque virtual que se pasará a Liana. Debe ser un bloque futuro anterior a la expiración del ciclado de tu UTXO y a que el recovery path miniscript pueda gastar. Con esta opción activa, Liana mostrará una altura falsa; cualquier tx que construya es no-final hasta esa altura.
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1214,7 +1215,7 @@
                 stat_btc_price_stale: 'Cached price',
                 import_title: 'Import Transaction', import_hex: 'Raw transaction hex (02000000...)', import_label: 'Label (optional)', import_fee: 'Target Fee (sat/vB)', import_btn: 'Import', import_schedule_all: 'Schedule All',
                 pool_title: 'Transaction Pool', pool_refresh: 'Refresh',
-                pool_th_poolid: 'Pool ID', pool_th_txid: 'TXID', pool_th_status: 'Status', pool_th_type: 'Type', pool_th_scheduled: 'Scheduled', pool_th_actions: 'Actions',
+                pool_th_poolid: 'Pool ID', pool_th_txid: 'TXID', pool_th_source: 'Source', pool_th_status: 'Status', pool_th_type: 'Type', pool_th_scheduled: 'Scheduled', pool_th_actions: 'Actions',
                 pool_empty: 'No transactions in pool. Import a signed TX to get started.',
                 btn_view_details: 'View details', btn_waiting_block: 'waiting for block', btn_waiting_locktime: 'waiting locktime', btn_deferred_mtp: 'deferred — MTP pending', btn_reschedule: 'Reschedule', btn_schedule: 'Schedule', btn_remove: 'Remove', btn_retry: 'Retry',
                 cfg_title: 'Configuration',
@@ -1340,7 +1341,7 @@
                 stat_btc_price_stale: 'Precio en cach\u00e9',
                 import_title: 'Importar Transacci\u00f3n', import_hex: 'Hex de transacci\u00f3n cruda (02000000...)', import_label: 'Etiqueta (opcional)', import_fee: 'Tarifa Objetivo (sat/vB)', import_btn: 'Importar', import_schedule_all: 'Programar Todas',
                 pool_title: 'Pool de Transacciones', pool_refresh: 'Actualizar',
-                pool_th_poolid: 'ID del Pool', pool_th_txid: 'TXID', pool_th_status: 'Estado', pool_th_type: 'Tipo', pool_th_scheduled: 'Programada', pool_th_actions: 'Acciones',
+                pool_th_poolid: 'ID del Pool', pool_th_txid: 'TXID', pool_th_source: 'Origen', pool_th_status: 'Estado', pool_th_type: 'Tipo', pool_th_scheduled: 'Programada', pool_th_actions: 'Acciones',
                 pool_empty: 'No hay transacciones en el pool. Importa una TX firmada para comenzar.',
                 btn_view_details: 'Ver detalles', btn_waiting_block: 'esperando bloque', btn_waiting_locktime: 'esperando locktime', btn_deferred_mtp: 'diferida — MTP pendiente', btn_reschedule: 'Reprogramar', btn_schedule: 'Programar', btn_remove: 'Eliminar', btn_retry: 'Reintentar',
                 cfg_title: 'Configuraci\u00f3n',
@@ -1602,6 +1603,16 @@
                 <span class="text">${text}</span>
                 <span class="copy-icon">&#128203;</span>
             </span>`;
+        }
+
+        // Origin wallet of a tx, colour-coded for at-a-glance identification:
+        // Liana = project green, Sparrow = bitcoin orange. Unknown/manual labels stay dim.
+        function sourceCell(tx) {
+            const raw = (tx.source_label || '').toLowerCase();
+            if (raw.includes('liana')) return `<span style="color: var(--green); font-weight:600;">Liana</span>`;
+            if (raw.includes('sparrow')) return `<span style="color: var(--btc); font-weight:600;">Sparrow</span>`;
+            if (tx.source_label) return `<span style="color: var(--text-dim);">${tx.source_label}</span>`;
+            return `<span style="color: var(--text-dim);">-</span>`;
         }
 
         function formatUnixTs(unix) {
@@ -1913,14 +1924,16 @@
 
                 const tbody = document.getElementById('tx-list');
                 if (!allTxs.length) {
-                    tbody.innerHTML = `<tr><td colspan="6" class="empty">${t('pool_empty')}</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="7" class="empty">${t('pool_empty')}</td></tr>`;
                     return;
                 }
                 tbody.innerHTML = allTxs.map(tx => {
                     const poolId = tx.id.substring(0, 8) + '...';
                     const txidShort = tx.txid ? tx.txid.substring(0, 10) + '...' : '-';
-                    const txidLink = tx.txid
-                        ? `<a class="mempool-link" href="${mempoolUrl(tx.txid, tx.network)}" target="_blank" title="View on mempool.space">${txidShort} &#8599;</a>`
+                    // Single txid: a mempool link (opens explorer) plus a copy icon (copies the
+                    // full txid without navigating). Shown once — not duplicated as chip + link.
+                    const txidCell = tx.txid
+                        ? `<a class="mempool-link" href="${mempoolUrl(tx.txid, tx.network)}" target="_blank" title="View on mempool.space">${txidShort} &#8599;</a><span class="copy-icon" style="cursor:pointer; margin-left:6px;" onclick="copyText('${tx.txid}')" title="${t('detail_copy_txid')}">&#128203;</span>`
                         : `<span style="color: var(--text-dim);">-</span>`;
                     const typeLabel = tx.broadcast_mode || '-';
                     const typeClass = tx.broadcast_mode ? `type-${tx.broadcast_mode}` : '';
@@ -1931,7 +1944,8 @@
                     return `
                     <tr>
                         <td>${makeCopyable(poolId, tx.id)}</td>
-                        <td>${tx.txid ? makeCopyable(txidShort, tx.txid) + ' ' + txidLink : '<span style="color: var(--text-dim);">-</span>'}</td>
+                        <td>${txidCell}</td>
+                        <td>${sourceCell(tx)}</td>
                         <td><span class="status status-${statusInfo.cls}">${statusInfo.label}</span></td>
                         <td><span class="status ${typeClass}">${typeLabel}</span></td>
                         <td class="time">${formatPriceTrigger(tx)}${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + schedLabel + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}${(tx.broadcast_mode === 'scheduled' || tx.broadcast_mode === 'manual') && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}${tx.locktime_deferred && tx.original_scheduled_time ? '<br><span style="font-size: 10px; color: #FF8E8E;">' + t('detail_original_scheduled') + ': ' + new Date(tx.original_scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}) + '</span>' : ''}${showMtpRemaining(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">MTP: ' + formatRemaining(tx.locktime_remaining_secs) + '</span>' : ''}${tx.broadcast_mode === 'manual' && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}${tx.broadcast_mode === 'immediate' || (!tx.scheduled_time && tx.broadcast_mode !== 'by_block' && tx.broadcast_mode !== 'manual' && tx.schedule_trigger !== 'price') ? '<span style="color: var(--text-dim);">-</span>' : ''}</td>
