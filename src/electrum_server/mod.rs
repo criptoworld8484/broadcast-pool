@@ -2263,10 +2263,17 @@ fn resolve_ingest_plan(
 ) -> (BroadcastMode, Option<chrono::DateTime<chrono::Utc>>) {
     if source_label == "liana" {
         let vb = &config.schedule.liana_virtual_block;
-        // Armed virtual block + a by-height nLockTime = the user's UTXO-cycling intent: hold as
-        // by_block targeting that height, not manual. is_locktime_satisfied still gates broadcast.
-        if vb.enabled && nlocktime > 0 && nlocktime < 500_000_000 {
-            tracing::info!("Liana virtual-block ingest → by_block target {}", nlocktime);
+        // Armed virtual block: hold as by_block targeting the armed config height. Real Liana
+        // signs its refresh spend with nLockTime=0 (the served virtual height never lands in the
+        // tx), so we do NOT gate on the tx's nLockTime here — the persist path stores the config
+        // target as the by_block target, and is_locktime_satisfied then holds against it. Disarmed
+        // Liana keeps the old manual behaviour.
+        if vb.enabled {
+            tracing::info!(
+                "Liana virtual-block ingest → by_block (target = armed height {}, tx nLockTime {})",
+                vb.target_height,
+                nlocktime
+            );
             return (BroadcastMode::ByBlock, None);
         }
         tracing::info!("Liana ingest → manual scheduling (pending until user sets date/price)");
@@ -2377,20 +2384,28 @@ fn handle_broadcast(
         resolve_ingest_plan(source_label, nlocktime, &cfg)
     };
 
-    // After capturing a Liana virtual-block tx, advance the served height by +2 so the next
-    // Liana tx gets a distinct, higher locktime (decorrelation). Persist so it survives restart.
-    if broadcast_mode == BroadcastMode::ByBlock && source_label == "liana" {
-        let mut cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
-        if cfg.schedule.liana_virtual_block.enabled {
-            cfg.schedule.liana_virtual_block.target_height =
-                cfg.schedule.liana_virtual_block.target_height.saturating_add(2);
-            let snapshot = cfg.clone();
-            drop(cfg);
-            if let Err(e) = crate::discovery::save_config_to_disk(&snapshot) {
-                tracing::warn!("Failed to persist advanced virtual-block height: {}", e);
+    // Armed Liana virtual-block capture: Liana signs nLockTime=0, so the schedule target is the
+    // armed config height it was served — not the tx's own nLockTime. Capture that target for the
+    // by_block column, then advance the served height by +2 so the next Liana tx targets a distinct
+    // higher block (decorrelation). Persist so both survive a restart.
+    let virtual_block_target: Option<u64> =
+        if broadcast_mode == BroadcastMode::ByBlock && source_label == "liana" {
+            let mut cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+            if cfg.schedule.liana_virtual_block.enabled {
+                let target = cfg.schedule.liana_virtual_block.target_height;
+                cfg.schedule.liana_virtual_block.target_height = target.saturating_add(2);
+                let snapshot = cfg.clone();
+                drop(cfg);
+                if let Err(e) = crate::discovery::save_config_to_disk(&snapshot) {
+                    tracing::warn!("Failed to persist advanced virtual-block height: {}", e);
+                }
+                Some(target)
+            } else {
+                None
             }
-        }
-    }
+        } else {
+            None
+        };
 
     tracing::info!(
         "Broadcast plan: source={}, mode={}, scheduled={:?}, nlocktime={}",
@@ -2403,11 +2418,13 @@ fn handle_broadcast(
     let new_tx = NewBroadcastTx {
         tx_hex: tx_hex_clean.to_string(),
         network,
-        nlocktime: if nlocktime > 0 {
+        // For an armed Liana virtual-block capture the by_block target is the config height, not
+        // the tx's own (zero) nLockTime; otherwise fall back to the tx's real nLockTime.
+        nlocktime: virtual_block_target.or(if nlocktime > 0 {
             Some(nlocktime as u64)
         } else {
             None
-        },
+        }),
         broadcast_mode: Some(broadcast_mode.to_string()),
         scheduled_time,
         target_fee_rate: None,
@@ -2674,6 +2691,27 @@ mod tests {
     fn disarmed_liana_height_locktime_stays_manual() {
         let cfg = Config::default_config(); // liana_virtual_block disarmed by default
         let (mode, _) = resolve_ingest_plan("liana", 950430, &cfg);
+        assert_eq!(mode, BroadcastMode::Manual);
+    }
+
+    // Real Liana signs its refresh spend with nLockTime=0 (the served virtual height does not end
+    // up in the tx). While armed, that tx must STILL be held as by_block against the config target
+    // — the schedule target is the armed height, not the tx's own (zero) nLockTime.
+    #[test]
+    fn armed_liana_zero_locktime_becomes_by_block() {
+        let mut cfg = Config::default_config();
+        cfg.schedule.liana_virtual_block.enabled = true;
+        cfg.schedule.liana_virtual_block.target_height = 950430;
+
+        let (mode, sched) = resolve_ingest_plan("liana", 0, &cfg);
+        assert_eq!(mode, BroadcastMode::ByBlock);
+        assert!(sched.is_none());
+    }
+
+    #[test]
+    fn disarmed_liana_zero_locktime_stays_manual() {
+        let cfg = Config::default_config();
+        let (mode, _) = resolve_ingest_plan("liana", 0, &cfg);
         assert_eq!(mode, BroadcastMode::Manual);
     }
 
