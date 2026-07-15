@@ -255,12 +255,35 @@ impl PoolManager {
             }
         }
         if let Some(ref rpc) = self.rpc {
-            return rpc.broadcast_transaction(tx_hex);
+            match rpc.broadcast_transaction(tx_hex) {
+                Ok(txid) => return Ok(txid),
+                Err(e) => {
+                    tracing::warn!("Core RPC broadcast failed: {}, trying secondary indexer...", e);
+                    indexer_err = indexer_err.or(Some(e));
+                }
+            }
+        }
+        // Last resort: a secondary indexer on the LAN.
+        let secondary_url = {
+            let cfg = self.config.lock().ok();
+            cfg.and_then(|c| c.secondary_indexer.clone())
+        };
+        if let Some(raw) = secondary_url {
+            let url = crate::discovery::normalize_indexer_url(&raw);
+            if let Ok(client) = ElectrumClient::new(&url) {
+                match client.broadcast_transaction(tx_hex) {
+                    Ok(txid) => {
+                        tracing::info!("Broadcast via secondary indexer {}", url);
+                        return Ok(txid);
+                    }
+                    Err(e) => tracing::warn!("Secondary indexer broadcast failed: {}", e),
+                }
+            }
         }
         if let Some(e) = indexer_err {
             return Err(e);
         }
-        anyhow::bail!("No broadcast backend available (neither Indexer nor RPC)")
+        anyhow::bail!("No broadcast backend available (indexer, Core, nor secondary)")
     }
 
     pub fn import_transaction(&self, new_tx: &NewBroadcastTx) -> Result<BroadcastTx> {
