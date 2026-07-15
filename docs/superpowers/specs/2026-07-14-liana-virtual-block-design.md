@@ -1,8 +1,34 @@
 # Bloque virtual para Liana (ciclado de UTXO) — Diseño
 
 Fecha: 2026-07-14
-Estado: aprobado (pendiente de plan de implementación)
+Estado: implementado; premisa corregida tras E2E (2026-07-15).
 Relacionado: `mejoras.md` §3 ("nLockTime rancio"), decisión 2026-07-14 "bloque virtual futuro para Liana".
+
+## ADENDA 2026-07-15 — Hallazgo del E2E contra Liana real y pivote a "retener por objetivo de config"
+
+La prueba end-to-end en el nodo (testnet4, Umbrel) reveló que **la premisa original era
+falsa para Liana**: se le sirvió la altura virtual (144196) y Liana **aceptó las cabeceras
+sintéticas sin PoW** y construyó/envió su tx de refresco — pero la firmó con **`nLockTime = 0`**
+(`nSequence = 0xfffffffd`, RBF), no con la altura servida. El ciclado de UTXO de Liana usa un
+timelock **relativo** (CSV en el descriptor miniscript), que no necesita `nLockTime` absoluto;
+la altura servida le sirve para *ver* la cadena adelantada, pero no acaba en la transacción.
+
+Consecuencias:
+- La huella anti-fingerprinting (que el `nLockTime` on-chain parezca reciente) **no se consigue**
+  por esta vía: Liana no escribe la altura en el `nLockTime`. (`nLockTime=0` tampoco es la huella
+  "rancia" que se quería evitar.)
+- El "retener y difundir en el bloque V" **sí se consigue**, desacoplándolo del `nLockTime` de la
+  tx.
+
+**Decisión (Opción 1, aprobada por el usuario):** con el tick armado, una tx de Liana —incluida
+`nLockTime=0`— se ingesta como `by_block` cuyo objetivo es la **altura de config armada** que se le
+sirvió, almacenada en la columna `nlocktime` de la BD. El scheduler `by_block` existente la retiene
+hasta que la cadena real alcanza ese objetivo y la difunde (la tx con `nLockTime=0` es válida a
+cualquier altura). El escalón +2 por captura se mantiene. Verificado en vivo en la rc2: la tx entra
+`mode=by_block, nlocktime=<objetivo>, source=liana` y queda retenida, en vez de caer a manual.
+
+El resto del documento describe el diseño original; la sección de ingesta (§Componentes → Ingesta)
+queda sustituida por esta adenda en lo relativo a de dónde sale el objetivo (config, no `nLockTime`).
 
 ## Problema
 
