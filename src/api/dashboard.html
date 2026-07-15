@@ -709,6 +709,60 @@
             box-shadow: 0 0 0 3px var(--btc-dim);
         }
 
+        /* Sliding toggle switch (used for the Liana virtual-block option) */
+        .switch {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .switch input {
+            position: absolute;
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .switch .switch-track {
+            position: relative;
+            width: 46px;
+            height: 26px;
+            flex: none;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+        }
+        .switch .switch-track::after {
+            content: '';
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--text-dim);
+            transition: transform 0.25s ease, background 0.25s ease;
+        }
+        .switch input:focus-visible + .switch-track {
+            box-shadow: 0 0 0 3px var(--liana-green-dim);
+        }
+        .switch input:checked + .switch-track {
+            background: var(--liana-green-dim);
+            border-color: var(--liana-green);
+            box-shadow: 0 0 12px var(--liana-green-dim);
+        }
+        .switch input:checked + .switch-track::after {
+            transform: translateX(20px);
+            background: var(--liana-green);
+        }
+        .switch .switch-label {
+            font-family: var(--font-mono);
+            font-size: 14px;
+            color: var(--text);
+            letter-spacing: 0.3px;
+        }
+
         .setting-hint { font-size: 14px; color: var(--text-dim); margin-top: 8px; }
 
         /* ── Datetime picker styling ─────────────────── */
@@ -926,9 +980,10 @@
                             </select>
                             <div class="setting-hint" data-i18n="cfg_mode_hint">How transactions from your wallet are broadcast</div>
                             <div id="cfg-liana-vb-group" style="display:none; margin-top:18px; padding-top:16px; border-top:1px solid var(--border);">
-                                <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; letter-spacing:0;">
+                                <label class="switch">
                                     <input type="checkbox" id="cfg-liana-vb-enabled" onchange="toggleLianaVb()">
-                                    <span data-i18n="cfg_liana_vb_tick">Programar ciclado UTXO de Liana</span>
+                                    <span class="switch-track"></span>
+                                    <span class="switch-label" data-i18n="cfg_liana_vb_tick">Programar ciclado UTXO de Liana</span>
                                 </label>
                                 <div id="cfg-liana-vb-fields" style="display:none; margin-top:14px;">
                                     <label data-i18n="cfg_liana_vb_height">Altura de bloque virtual</label>
