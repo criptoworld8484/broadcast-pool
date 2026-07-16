@@ -50,8 +50,8 @@ jobs:
           ASSET_NAME="start-cli_${ARCH}-${OS}"
           DOWNLOAD_URL=$(curl -fsS \
             -H "Authorization: token ${{ github.token }}" \
-            https://api.github.com/repos/Start9Labs/start-os/releases \
-            | jq -r '[.[].assets[] | select(.name=="'"$ASSET_NAME"'")] | first | .browser_download_url')
+            "https://api.github.com/repos/Start9Labs/start-os/releases?per_page=100" \
+            | jq -r --arg n "$ASSET_NAME" '[.[]?.assets[]? | select(.name==$n)] | first | .browser_download_url')
           if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
             echo "Error: Could not find asset '$ASSET_NAME' in Start9Labs/start-os releases"
             exit 1
