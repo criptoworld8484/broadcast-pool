@@ -44,22 +44,19 @@ jobs:
       - uses: docker/setup-buildx-action@v4
 
       - name: Install start-cli
+        # Pinned direct download. Start9 reorganized releases (start-cli lives in
+        # the `start-cli/*` release, served from start-technologies), and scanning
+        # the cross-repo releases API from CI intermittently returns an error object
+        # (rate limit) that breaks the jq lookup. A pinned URL is deterministic.
+        env:
+          START_CLI_TAG: start-cli/v1.0.3
         run: |
           ARCH=$(uname -m)
           OS=$(uname -s | tr '[:upper:]' '[:lower:]')
           ASSET_NAME="start-cli_${ARCH}-${OS}"
-          DOWNLOAD_URL=$(curl -fsS \
-            -H "Authorization: token ${{ github.token }}" \
-            "https://api.github.com/repos/Start9Labs/start-os/releases?per_page=100" \
-            | jq -r --arg n "$ASSET_NAME" '[.[]?.assets[]? | select(.name==$n)] | first | .browser_download_url')
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-            echo "Error: Could not find asset '$ASSET_NAME' in Start9Labs/start-os releases"
-            exit 1
-          fi
-          curl -fsSL \
-            -H "Authorization: token ${{ github.token }}" \
-            -H "Accept: application/octet-stream" \
-            "$DOWNLOAD_URL" -o /tmp/start-cli
+          URL="https://github.com/Start9Labs/start-technologies/releases/download/${START_CLI_TAG}/${ASSET_NAME}"
+          curl -fsSL "$URL" -o /tmp/start-cli
+          test -s /tmp/start-cli
           sudo install -m 755 /tmp/start-cli /usr/local/bin/start-cli
           start-cli --version
 
