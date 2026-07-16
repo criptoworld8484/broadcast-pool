@@ -126,6 +126,10 @@ fn config_to_response(config: &Config, network_changed: bool) -> ConfigResponse 
         broadcast_mode: config.schedule.broadcast_mode.to_string(),
         default_delay_hours: config.schedule.default_delay_hours,
         scheduled_datetime: config.schedule.scheduled_datetime.clone(),
+        liana_vb_enabled: config.schedule.liana_virtual_block.enabled,
+        liana_vb_target_height: config.schedule.liana_virtual_block.target_height,
+        liana_vb_armed_at_height: config.schedule.liana_virtual_block.armed_at_height,
+        secondary_indexer_url: config.secondary_indexer.clone().unwrap_or_default(),
         min_delay_hours: config.schedule.min_delay_hours,
         max_delay_hours: config.schedule.max_delay_hours,
         min_fee_rate: config.schedule.min_fee_rate,
@@ -142,6 +146,60 @@ fn config_to_response(config: &Config, network_changed: bool) -> ConfigResponse 
 
 fn live_test_indexer_url(url: &str, network: &crate::config::NetworkType) -> bool {
     crate::discovery::resolve_working_indexer_url(url, network).is_some()
+}
+
+/// `extract_indexer_host` only splits on `:` — it happily returns garbage like `"!!!"` as a
+/// "host". Reject anything that isn't plausibly a hostname or IP (alnum plus `.`/`-`/`_`/`:`
+/// for IPv6) so `normalize_secondary_indexer` can actually distinguish real input from noise.
+fn is_plausible_host(host: &str) -> bool {
+    !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+}
+
+/// Normalize a user-entered secondary indexer (IP, host:port, or tcp/ssl URL). Empty → None
+/// (clears it). A value with no resolvable host → Err with a message. Uses the same normalization
+/// as the primary/external indexer so behaviour is consistent.
+fn normalize_secondary_indexer(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let normalized = crate::discovery::normalize_indexer_url(trimmed);
+    match crate::discovery::extract_indexer_host(&normalized) {
+        Some(host) if is_plausible_host(&host) => Ok(Some(normalized)),
+        _ => Err(format!("Dirección de indexador secundario no válida: {}", raw)),
+    }
+}
+
+/// Maximum allowed gap between the real chain tip and an armed virtual target height
+/// (~100_000 blocks, roughly 2 years). Bounds the header-fabrication allocation/loop
+/// triggered on every armed Liana subscribe.
+const MAX_VIRTUAL_BLOCK_GAP: u64 = 100_000;
+
+/// A virtual block height must be a real future block. Reject 0 (unset) and anything at/below
+/// the current tip (it would be non-final immediately, defeating the point), and anything
+/// unreasonably far in the future (would force fabricating an enormous header range).
+fn validate_virtual_height(target: u64, real_height: Option<u64>) -> Result<(), String> {
+    if target == 0 {
+        return Err("Introduce una altura de bloque virtual futura.".into());
+    }
+    if let Some(h) = real_height {
+        if target <= h {
+            return Err(format!(
+                "La altura virtual {} debe ser mayor que la altura actual {}.",
+                target, h
+            ));
+        }
+        if target > h + MAX_VIRTUAL_BLOCK_GAP {
+            return Err(format!(
+                "La altura virtual {} está demasiado lejos de la actual {} (máximo +{}).",
+                target, h, MAX_VIRTUAL_BLOCK_GAP
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn get_stats(State(state): State<AppState>) -> Result<Json<PoolStats>, (StatusCode, String)> {
@@ -397,6 +455,10 @@ struct StatusResponse {
     chain_height: Option<u64>,
     /// `host:port` of the configured indexer, for the degraded-mode message.
     indexer_url: String,
+    /// `host:port` of the configured secondary (tertiary-fallback) indexer, if any.
+    secondary_indexer_url: String,
+    /// Whether the secondary indexer answered on its last probe.
+    secondary_up: bool,
     /// Indexer software name (`electrs`, `Fulcrum`); `None` until known.
     indexer_software: Option<String>,
     core_ibd: bool,
@@ -410,6 +472,9 @@ struct StatusResponse {
     /// True when electrs is reachable and wallet URL is configured (Umbrel readiness).
     sparrow_ready: bool,
     sparrow_tor_warning: String,
+    liana_vb_enabled: bool,
+    liana_vb_target_height: u64,
+    liana_vb_disarm_height: u64,
 }
 
 #[derive(serde::Serialize, Deserialize)]
@@ -425,6 +490,10 @@ struct ConfigResponse {
     broadcast_mode: String,
     default_delay_hours: u64,
     scheduled_datetime: Option<String>,
+    liana_vb_enabled: bool,
+    liana_vb_target_height: u64,
+    liana_vb_armed_at_height: u64,
+    secondary_indexer_url: String,
     min_delay_hours: u64,
     max_delay_hours: u64,
     min_fee_rate: f64,
@@ -474,6 +543,9 @@ struct SaveConfigRequest {
     max_delay_hours: Option<u64>,
     min_fee_rate: Option<f64>,
     max_fee_rate: Option<f64>,
+    liana_vb_enabled: Option<bool>,
+    liana_vb_target_height: Option<u64>,
+    secondary_indexer: Option<String>,
 }
 
 async fn save_config(
@@ -481,6 +553,10 @@ async fn save_config(
     Json(req): Json<SaveConfigRequest>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, String)> {
     tracing::info!("save_config called");
+    // Read the live tip BEFORE taking the config lock: chain_health() locks a separate
+    // RwLock, and reading it while holding the config mutex risks a borrow/lock conflict
+    // (and, more importantly, checking order matters for correctness here).
+    let real_height = state.pool_manager.chain_health().height;
     let mut config = state.config.lock().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     tracing::info!("Config lock acquired");
 
@@ -588,6 +664,41 @@ async fn save_config(
     if let Some(v) = req.max_fee_rate {
         config.schedule.max_fee_rate = v;
     }
+
+    // Liana virtual block. Arming validates the height against the live tip and stamps armed_at.
+    if let Some(target) = req.liana_vb_target_height {
+        config.schedule.liana_virtual_block.target_height = target;
+    }
+    if let Some(enable) = req.liana_vb_enabled {
+        if enable {
+            let Some(armed_at) = real_height else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Altura de la cadena no disponible; reintenta en unos segundos.".into(),
+                ));
+            };
+            validate_virtual_height(
+                config.schedule.liana_virtual_block.target_height,
+                real_height,
+            )
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            config.schedule.liana_virtual_block.armed_at_height = armed_at;
+            config.schedule.liana_virtual_block.enabled = true;
+            tracing::info!(
+                "Liana virtual block armed: target={} armed_at={}",
+                config.schedule.liana_virtual_block.target_height,
+                config.schedule.liana_virtual_block.armed_at_height
+            );
+        } else {
+            config.schedule.liana_virtual_block.enabled = false;
+        }
+    }
+
+    if let Some(raw) = req.secondary_indexer {
+        let normalized = normalize_secondary_indexer(&raw)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        config.secondary_indexer = normalized;
+    }
     tracing::info!("Config modified");
 
     crate::discovery::save_config_to_disk(&config)
@@ -642,13 +753,38 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
             .as_ref()
             .map(|i| crate::discovery::display_indexer_url(&i.url))
             .unwrap_or_default();
-        Ok::<_, String>((stats, health, network, network_display, wallet_url, indexer_url))
+        let secondary_indexer_url = cfg.secondary_indexer.clone().unwrap_or_default();
+        let liana_vb_enabled = cfg.schedule.liana_virtual_block.enabled;
+        let liana_vb_target_height = cfg.schedule.liana_virtual_block.target_height;
+        let liana_vb_disarm_height = cfg.schedule.liana_virtual_block.armed_at_height + 10;
+        Ok::<_, String>((
+            stats,
+            health,
+            network,
+            network_display,
+            wallet_url,
+            indexer_url,
+            secondary_indexer_url,
+            liana_vb_enabled,
+            liana_vb_target_height,
+            liana_vb_disarm_height,
+        ))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {}", e)))?;
 
-    let (pool_stats, health, network, network_display, wallet_url, indexer_url) =
-        result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let (
+        pool_stats,
+        health,
+        network,
+        network_display,
+        wallet_url,
+        indexer_url,
+        secondary_indexer_url,
+        liana_vb_enabled,
+        liana_vb_target_height,
+        liana_vb_disarm_height,
+    ) = result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let electrum_connected = health.indexer_up;
 
@@ -668,6 +804,8 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         chain_source: health.source,
         chain_height: health.height,
         indexer_url,
+        secondary_indexer_url,
+        secondary_up: health.secondary_up,
         indexer_software: health.indexer_software.clone(),
         core_ibd: health.core_ibd,
         core_sync_pct: health.core_sync_pct,
@@ -680,6 +818,9 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         // folding it in here told the user to go fix the wallet, which is not where the fault is.
         sparrow_ready: !wallet_url.is_empty() && !wallet_url.contains('<'),
         sparrow_tor_warning: "Disable Sparrow Settings→Network proxy/Tor or broadcasts bypass this pool (mempool.space). Use tcp://LAN:50050 only.".into(),
+        liana_vb_enabled,
+        liana_vb_target_height,
+        liana_vb_disarm_height,
     }))
 }
 
@@ -953,4 +1094,42 @@ async fn restart_daemon() -> impl IntoResponse {
     });
     let _ = handle.await;
     "Restarting"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_height_must_be_future() {
+        assert!(validate_virtual_height(0, Some(100)).is_err()); // unset
+        assert!(validate_virtual_height(100, Some(100)).is_err()); // equal to tip
+        assert!(validate_virtual_height(90, Some(100)).is_err()); // below tip
+        assert!(validate_virtual_height(150, Some(100)).is_ok()); // future
+        assert!(validate_virtual_height(150, None).is_ok()); // no height known → allow
+    }
+
+    #[test]
+    fn virtual_height_gap_is_capped() {
+        let real = 100u64;
+        // Within the allowed gap → Ok.
+        assert!(validate_virtual_height(real + MAX_VIRTUAL_BLOCK_GAP, Some(real)).is_ok());
+        // Just beyond the allowed gap → Err.
+        assert!(validate_virtual_height(real + MAX_VIRTUAL_BLOCK_GAP + 1, Some(real)).is_err());
+        // Absurdly far beyond → Err.
+        assert!(validate_virtual_height(real + 10_000_000, Some(real)).is_err());
+        // No real height known → gap check doesn't apply (existing None => Ok behaviour).
+        assert!(validate_virtual_height(real + 10_000_000, None).is_ok());
+    }
+
+    #[test]
+    fn secondary_indexer_normalization() {
+        assert_eq!(normalize_secondary_indexer("").unwrap(), None);
+        assert_eq!(normalize_secondary_indexer("   ").unwrap(), None);
+        // IP or host:port normalizes to a tcp:// url with a port.
+        let n = normalize_secondary_indexer("192.168.1.50:50001").unwrap().unwrap();
+        assert!(n.contains("192.168.1.50:50001"), "got {}", n);
+        // Garbage with no host → error.
+        assert!(normalize_secondary_indexer("!!!").is_err());
+    }
 }

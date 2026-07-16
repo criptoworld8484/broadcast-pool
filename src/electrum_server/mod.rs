@@ -1,4 +1,5 @@
 mod pending;
+mod virtual_headers;
 
 use anyhow::{Context, Result};
 use bitcoin::consensus::Decodable;
@@ -955,12 +956,86 @@ fn spawn_chain_tip_refresh(indexer_url: &str, pool_manager: &Arc<PoolManager>) {
     });
 }
 
+/// The virtual tip height to serve, or None when the feature is disarmed or the peer is Sparrow.
+fn virtual_tip_height(cfg: &Config, is_liana: bool) -> Option<u64> {
+    let vb = &cfg.schedule.liana_virtual_block;
+    if is_liana && vb.enabled && vb.target_height > 0 {
+        Some(vb.target_height)
+    } else {
+        None
+    }
+}
+
+/// Whether the warm-cache instant-answer fast path for `blockchain.headers.subscribe` may be
+/// used for this session. It must NOT be used for an armed Liana session — that session needs
+/// to fall through to the normal dispatch path so the fabricated virtual tip is served instead
+/// of the real cached tip. Everyone else (Sparrow, or a disarmed/unenrolled Liana) keeps the
+/// fast path unchanged.
+fn should_use_instant_headers_cache(is_liana: bool, cfg: &Config) -> bool {
+    virtual_tip_height(cfg, is_liana).is_none()
+}
+
+/// True only when `height` falls inside the armed virtual range, i.e. `virtual_tip` is `Some`
+/// and `height <= virtual_tip`. Used to clamp fabrication so a client can't request an
+/// unbounded height (which would otherwise blow up `fabricate_headers`'s allocation/loop).
+fn virtual_header_in_range(height: u64, virtual_tip: Option<u64>) -> bool {
+    matches!(virtual_tip, Some(vtip) if height <= vtip)
+}
+
+/// Answer `blockchain.block.header` (single) for a Liana virtual height above the real tip.
+/// Heights at/below the real tip, heights above the armed virtual tip, and `block.headers`
+/// ranges, all return None → normal forwarding.
+fn serve_virtual_block_header(
+    request: &JsonRpcRequest,
+    pool_manager: &Arc<PoolManager>,
+    virtual_tip: Option<u64>,
+) -> Option<serde_json::Value> {
+    if request.method != "blockchain.block.header" {
+        return None; // block.headers ranges: forward for now (Liana backfills via subscribe).
+    }
+    let params = request.params.as_ref()?.as_array()?;
+    let height = params.first()?.as_u64()?;
+    if !virtual_header_in_range(height, virtual_tip) {
+        return None; // out of the armed virtual range: forward normally.
+    }
+    let (real_h, real_hex) = pool_manager.get_cached_chain_tip()?;
+    match virtual_headers::header_hex_at(real_h, &real_hex, height) {
+        Ok(Some(hex)) => Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": hex,
+            "id": request.id
+        })),
+        _ => None,
+    }
+}
+
 async fn handle_headers_subscribe(
     request: &JsonRpcRequest,
     pool_manager: &Arc<PoolManager>,
     indexer_url: &str,
+    virtual_tip: Option<u64>,
 ) -> Result<serde_json::Value> {
     let id = request.id.clone();
+
+    // Liana virtual block: serve a fabricated tip ABOVE the real one. Never touches the shared
+    // real-tip cache (that is what Sparrow reads), so it can only lie to this one Liana session.
+    if let Some(vtip) = virtual_tip {
+        if let Some((real_h, real_hex)) = pool_manager.get_cached_chain_tip() {
+            let up_to = vtip.max(real_h + 1);
+            match virtual_headers::header_hex_at(real_h, &real_hex, up_to) {
+                Ok(Some(hex)) => {
+                    tracing::info!("Serving Liana virtual tip height={} (real={})", up_to, real_h);
+                    return Ok(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "result": { "height": up_to, "hex": hex },
+                        "id": request.id
+                    }));
+                }
+                Ok(None) => {} // unreachable here since up_to = vtip.max(real_h + 1) > real_h; kept for header_hex_at's general contract.
+                Err(e) => tracing::warn!("virtual header fabrication failed: {}", e),
+            }
+        }
+    }
 
     // Cache-first: Sparrow Test Connection must not block on slow Umbrel electrs.
     if let Some((height, hex)) = pool_manager.get_cached_chain_tip() {
@@ -1184,8 +1259,28 @@ async fn handle_one_subrequest(
         }
     }
 
+    if request.method == "blockchain.block.header"
+        || request.method == "blockchain.block.headers"
+    {
+        let vtip = {
+            let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+            let is_liana = session.effective_source(source_label) == "liana";
+            virtual_tip_height(&cfg, is_liana)
+        };
+        if vtip.is_some() {
+            if let Some(resp) = serve_virtual_block_header(request, pool_manager, vtip) {
+                return Ok(resp);
+            }
+        }
+    }
+
     if request.method == "blockchain.headers.subscribe" {
-        return handle_headers_subscribe(request, pool_manager, indexer_url).await;
+        let vtip = {
+            let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+            let is_liana = session.effective_source(source_label) == "liana";
+            virtual_tip_height(&cfg, is_liana)
+        };
+        return handle_headers_subscribe(request, pool_manager, indexer_url, vtip).await;
     }
 
     if !indexer_url.is_empty() {
@@ -1777,25 +1872,35 @@ async fn process_client_line(
     }
 
     // Instant headers.subscribe when cache is warm (Sparrow Test Connection).
+    // Skipped for an armed Liana session: it must fall through to the normal dispatch path
+    // (handle_one_subrequest → handle_headers_subscribe) so the fabricated virtual tip is
+    // served instead of the real cached tip.
     if let Ok(reqs) = parse_subrequests(line_str) {
         if reqs.len() == 1 && reqs[0].method == "blockchain.headers.subscribe" {
-            if let Some((height, hex)) = pool_manager.get_cached_chain_tip() {
-                spawn_chain_tip_refresh(indexer_url, pool_manager);
-                write_json_rpc_response(
-                    client_stream,
-                    &serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "result": { "height": height, "hex": hex },
-                        "id": reqs[0].id
-                    }),
-                )
-                .await?;
-                tracing::info!(
-                    "Electrum RPC from {}: [blockchain.headers.subscribe] (instant cache height={})",
-                    peer_addr,
-                    height
-                );
-                return Ok(());
+            let is_liana = session.effective_source(source_label) == "liana";
+            let use_instant_cache = {
+                let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+                should_use_instant_headers_cache(is_liana, &cfg)
+            };
+            if use_instant_cache {
+                if let Some((height, hex)) = pool_manager.get_cached_chain_tip() {
+                    spawn_chain_tip_refresh(indexer_url, pool_manager);
+                    write_json_rpc_response(
+                        client_stream,
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "result": { "height": height, "hex": hex },
+                            "id": reqs[0].id
+                        }),
+                    )
+                    .await?;
+                    tracing::info!(
+                        "Electrum RPC from {}: [blockchain.headers.subscribe] (instant cache height={})",
+                        peer_addr,
+                        height
+                    );
+                    return Ok(());
+                }
             }
         }
     }
@@ -2157,6 +2262,20 @@ fn resolve_ingest_plan(
     config: &Config,
 ) -> (BroadcastMode, Option<chrono::DateTime<chrono::Utc>>) {
     if source_label == "liana" {
+        let vb = &config.schedule.liana_virtual_block;
+        // Armed virtual block: hold as by_block targeting the armed config height. Real Liana
+        // signs its refresh spend with nLockTime=0 (the served virtual height never lands in the
+        // tx), so we do NOT gate on the tx's nLockTime here — the persist path stores the config
+        // target as the by_block target, and is_locktime_satisfied then holds against it. Disarmed
+        // Liana keeps the old manual behaviour.
+        if vb.enabled {
+            tracing::info!(
+                "Liana virtual-block ingest → by_block (target = armed height {}, tx nLockTime {})",
+                vb.target_height,
+                nlocktime
+            );
+            return (BroadcastMode::ByBlock, None);
+        }
         tracing::info!("Liana ingest → manual scheduling (pending until user sets date/price)");
         return (BroadcastMode::Manual, None);
     }
@@ -2265,6 +2384,29 @@ fn handle_broadcast(
         resolve_ingest_plan(source_label, nlocktime, &cfg)
     };
 
+    // Armed Liana virtual-block capture: Liana signs nLockTime=0, so the schedule target is the
+    // armed config height it was served — not the tx's own nLockTime. Capture that target for the
+    // by_block column, then advance the served height by +2 so the next Liana tx targets a distinct
+    // higher block (decorrelation). Persist so both survive a restart.
+    let virtual_block_target: Option<u64> =
+        if broadcast_mode == BroadcastMode::ByBlock && source_label == "liana" {
+            let mut cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+            if cfg.schedule.liana_virtual_block.enabled {
+                let target = cfg.schedule.liana_virtual_block.target_height;
+                cfg.schedule.liana_virtual_block.target_height = target.saturating_add(2);
+                let snapshot = cfg.clone();
+                drop(cfg);
+                if let Err(e) = crate::discovery::save_config_to_disk(&snapshot) {
+                    tracing::warn!("Failed to persist advanced virtual-block height: {}", e);
+                }
+                Some(target)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
     tracing::info!(
         "Broadcast plan: source={}, mode={}, scheduled={:?}, nlocktime={}",
         source_label,
@@ -2276,11 +2418,13 @@ fn handle_broadcast(
     let new_tx = NewBroadcastTx {
         tx_hex: tx_hex_clean.to_string(),
         network,
-        nlocktime: if nlocktime > 0 {
+        // For an armed Liana virtual-block capture the by_block target is the config height, not
+        // the tx's own (zero) nLockTime; otherwise fall back to the tx's real nLockTime.
+        nlocktime: virtual_block_target.or(if nlocktime > 0 {
             Some(nlocktime as u64)
         } else {
             None
-        },
+        }),
         broadcast_mode: Some(broadcast_mode.to_string()),
         scheduled_time,
         target_fee_rate: None,
@@ -2397,6 +2541,55 @@ mod tests {
     }
 
     #[test]
+    fn virtual_tip_only_for_armed_liana() {
+        let mut cfg = Config::default_config();
+        cfg.schedule.liana_virtual_block.enabled = true;
+        cfg.schedule.liana_virtual_block.target_height = 950430;
+
+        assert_eq!(virtual_tip_height(&cfg, true), Some(950430));
+        // Never for Sparrow.
+        assert_eq!(virtual_tip_height(&cfg, false), None);
+
+        // Disarmed → nothing.
+        cfg.schedule.liana_virtual_block.enabled = false;
+        assert_eq!(virtual_tip_height(&cfg, true), None);
+    }
+
+    #[test]
+    fn instant_headers_cache_skipped_only_for_armed_liana() {
+        let mut cfg = Config::default_config();
+        cfg.schedule.liana_virtual_block.enabled = true;
+        cfg.schedule.liana_virtual_block.target_height = 950430;
+
+        // Armed Liana: fast path must be skipped so the virtual dispatch path is used instead.
+        assert!(!should_use_instant_headers_cache(true, &cfg));
+
+        // Sparrow (even with the feature armed for Liana): fast path unchanged.
+        assert!(should_use_instant_headers_cache(false, &cfg));
+
+        // Disarmed Liana: fast path unchanged.
+        cfg.schedule.liana_virtual_block.enabled = false;
+        assert!(should_use_instant_headers_cache(true, &cfg));
+    }
+
+    // DoS guard: a client can't request a height beyond the operator-armed virtual tip and
+    // trigger an unbounded allocation/loop in `fabricate_headers`.
+    #[test]
+    fn virtual_header_in_range_clamps_to_armed_tip() {
+        // Above the virtual tip → out of range, must forward normally instead of fabricating.
+        assert!(!virtual_header_in_range(950431, Some(950430)));
+        assert!(!virtual_header_in_range(u64::MAX, Some(950430)));
+
+        // At or below the virtual tip → in range.
+        assert!(virtual_header_in_range(950430, Some(950430)));
+        assert!(virtual_header_in_range(1, Some(950430)));
+
+        // Disarmed (no virtual tip) → never in range.
+        assert!(!virtual_header_in_range(1, None));
+        assert!(!virtual_header_in_range(0, None));
+    }
+
+    #[test]
     fn extract_broadcast_hex_array_params() {
         let line = format!(
             r#"{{"jsonrpc":"2.0","method":"blockchain.transaction.broadcast","params":["{}"],"id":42}}"#,
@@ -2480,6 +2673,46 @@ mod tests {
         .expect("test config");
         let (mode, _) = resolve_ingest_plan("sparrow", 900_000, &cfg);
         assert_eq!(mode, BroadcastMode::ByBlock);
+    }
+
+    #[test]
+    fn armed_liana_height_locktime_becomes_by_block() {
+        let mut cfg = Config::default_config();
+        cfg.schedule.liana_virtual_block.enabled = true;
+        cfg.schedule.liana_virtual_block.target_height = 950430;
+
+        // Liana tx with a by-height nLockTime, armed → by_block.
+        let (mode, sched) = resolve_ingest_plan("liana", 950430, &cfg);
+        assert_eq!(mode, BroadcastMode::ByBlock);
+        assert!(sched.is_none());
+    }
+
+    #[test]
+    fn disarmed_liana_height_locktime_stays_manual() {
+        let cfg = Config::default_config(); // liana_virtual_block disarmed by default
+        let (mode, _) = resolve_ingest_plan("liana", 950430, &cfg);
+        assert_eq!(mode, BroadcastMode::Manual);
+    }
+
+    // Real Liana signs its refresh spend with nLockTime=0 (the served virtual height does not end
+    // up in the tx). While armed, that tx must STILL be held as by_block against the config target
+    // — the schedule target is the armed height, not the tx's own (zero) nLockTime.
+    #[test]
+    fn armed_liana_zero_locktime_becomes_by_block() {
+        let mut cfg = Config::default_config();
+        cfg.schedule.liana_virtual_block.enabled = true;
+        cfg.schedule.liana_virtual_block.target_height = 950430;
+
+        let (mode, sched) = resolve_ingest_plan("liana", 0, &cfg);
+        assert_eq!(mode, BroadcastMode::ByBlock);
+        assert!(sched.is_none());
+    }
+
+    #[test]
+    fn disarmed_liana_zero_locktime_stays_manual() {
+        let cfg = Config::default_config();
+        let (mode, _) = resolve_ingest_plan("liana", 0, &cfg);
+        assert_eq!(mode, BroadcastMode::Manual);
     }
 
     #[test]

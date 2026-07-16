@@ -255,12 +255,35 @@ impl PoolManager {
             }
         }
         if let Some(ref rpc) = self.rpc {
-            return rpc.broadcast_transaction(tx_hex);
+            match rpc.broadcast_transaction(tx_hex) {
+                Ok(txid) => return Ok(txid),
+                Err(e) => {
+                    tracing::warn!("Core RPC broadcast failed: {}, trying secondary indexer...", e);
+                    indexer_err = indexer_err.or(Some(e));
+                }
+            }
+        }
+        // Last resort: a secondary indexer on the LAN.
+        let secondary_url = {
+            let cfg = self.config.lock().ok();
+            cfg.and_then(|c| c.secondary_indexer.clone())
+        };
+        if let Some(raw) = secondary_url {
+            let url = crate::discovery::normalize_indexer_url(&raw);
+            if let Ok(client) = ElectrumClient::new(&url) {
+                match client.broadcast_transaction(tx_hex) {
+                    Ok(txid) => {
+                        tracing::info!("Broadcast via secondary indexer {}", url);
+                        return Ok(txid);
+                    }
+                    Err(e) => tracing::warn!("Secondary indexer broadcast failed: {}", e),
+                }
+            }
         }
         if let Some(e) = indexer_err {
             return Err(e);
         }
-        anyhow::bail!("No broadcast backend available (neither Indexer nor RPC)")
+        anyhow::bail!("No broadcast backend available (indexer, Core, nor secondary)")
     }
 
     pub fn import_transaction(&self, new_tx: &NewBroadcastTx) -> Result<BroadcastTx> {
@@ -1010,8 +1033,12 @@ impl PoolManager {
     fn write_chain_health(&self, f: impl FnOnce(&mut ChainHealth)) {
         if let Ok(mut health) = self.chain_health.write() {
             f(&mut health);
-            health.source =
-                decide_chain_source(health.indexer_up, health.core_up, health.core_ibd);
+            health.source = decide_chain_source(
+                health.indexer_up,
+                health.core_up,
+                health.core_ibd,
+                health.secondary_up,
+            );
         }
     }
 
@@ -1075,6 +1102,60 @@ impl PoolManager {
             None => (false, false, None, None, None),
         };
 
+        // Third fallback: probe the secondary indexer only when the primary is down and Core is
+        // unusable. Reads the URL + our network from config; a fresh ElectrumClient per probe
+        // (rare path).
+        let (secondary_url, secondary_network) = {
+            match self.config.lock().ok() {
+                Some(c) => (c.secondary_indexer.clone(), Some(c.network.network_type.clone())),
+                None => (None, None),
+            }
+        };
+        let secondary_configured = secondary_url.is_some();
+        let indexer_is_up = indexer_height.is_some();
+        let (secondary_up, secondary_height, secondary_mtp) = if should_probe_secondary(
+            indexer_is_up,
+            core_up,
+            core_ibd,
+            secondary_configured,
+        ) {
+            let url = crate::discovery::normalize_indexer_url(secondary_url.as_deref().unwrap_or(""));
+            match ElectrumClient::new(&url) {
+                Ok(client) => match client.get_block_height() {
+                    Ok(h) => {
+                        // Reject a wrong-network secondary before trusting its height: a mainnet
+                        // indexer answers ~900k blocks, which would mark testnet height-locked txs
+                        // due early. Only accept it if its genesis matches our configured network.
+                        let net_ok = secondary_network
+                            .as_ref()
+                            .map(|n| client.genesis_matches_network(n).unwrap_or(false))
+                            .unwrap_or(false);
+                        if net_ok {
+                            let mtp = client.get_median_time_past().ok();
+                            tracing::info!("Secondary indexer alive at {} (height {})", url, h);
+                            (true, Some(h), mtp)
+                        } else {
+                            tracing::warn!(
+                                "Secondary indexer {} is on a different network (genesis mismatch) — ignoring",
+                                url
+                            );
+                            (false, None, None)
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Secondary indexer probe failed: {}", e);
+                        (false, None, None)
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!("Secondary indexer client build failed: {}", e);
+                    (false, None, None)
+                }
+            }
+        } else {
+            (false, None, None)
+        };
+
         self.write_chain_health(|h| {
             h.indexer_up = indexer_height.is_some();
             // Keep the last known name while it is down: the degraded banner names the server the
@@ -1086,9 +1167,11 @@ impl PoolManager {
             h.core_up = core_up;
             h.core_ibd = core_ibd;
             h.core_sync_pct = core_sync_pct;
-            // Prefer the indexer's height when it is alive; it is what the wallet sees too.
-            h.height = indexer_height.or(core_height);
-            h.mtp = core_mtp.or(h.mtp);
+            h.secondary_configured = secondary_configured;
+            h.secondary_up = secondary_up;
+            // Prefer the indexer's height, then Core, then the secondary.
+            h.height = indexer_height.or(core_height).or(secondary_height);
+            h.mtp = core_mtp.or(secondary_mtp).or(h.mtp);
             h.polled = true;
         });
 
@@ -1097,6 +1180,13 @@ impl PoolManager {
         if let Some(mtp) = core_mtp {
             if let Ok(mut cache) = self.mtp_cache.lock() {
                 *cache = Some((Instant::now(), mtp));
+            }
+        }
+        if core_mtp.is_none() {
+            if let Some(mtp) = secondary_mtp {
+                if let Ok(mut cache) = self.mtp_cache.lock() {
+                    *cache = Some((Instant::now(), mtp));
+                }
             }
         }
 
@@ -1111,6 +1201,37 @@ impl PoolManager {
         );
 
         self.health_refresh_in_flight.store(false, Ordering::SeqCst);
+
+        self.maybe_disarm_virtual_block();
+    }
+
+    /// Disarm the virtual-block tick once real_height >= armed_at + 10. Cheap: a lock read plus,
+    /// only on the disarm edge, one config write. Called from the health poller.
+    pub fn maybe_disarm_virtual_block(&self) {
+        let real_height = match self.chain_health().height {
+            Some(h) => h,
+            None => return,
+        };
+        let snapshot = {
+            let mut cfg = match self.config.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let vb = &cfg.schedule.liana_virtual_block;
+            if !should_disarm(vb.enabled, vb.armed_at_height, real_height) {
+                return;
+            }
+            tracing::info!(
+                "Liana virtual block auto-disarmed (real height {} >= armed {} + 10)",
+                real_height,
+                cfg.schedule.liana_virtual_block.armed_at_height
+            );
+            cfg.schedule.liana_virtual_block.enabled = false;
+            cfg.clone()
+        };
+        if let Err(e) = crate::discovery::save_config_to_disk(&snapshot) {
+            tracing::warn!("Failed to persist virtual-block disarm: {}", e);
+        }
     }
 
     pub fn check_block_height(&self) -> Result<Option<u64>> {
@@ -1384,6 +1505,24 @@ fn is_retriable_broadcast_error(msg: &str) -> bool {
         || m.contains("too-long-mempool-chain")
 }
 
+/// Auto-disarm the Liana virtual block once the real chain has advanced 10 blocks past arming.
+/// Bounds the window in which we serve fake heights, even if the user forgets to unset the tick.
+fn should_disarm(enabled: bool, armed_at_height: u64, real_height: u64) -> bool {
+    enabled && real_height >= armed_at_height + 10
+}
+
+/// The secondary indexer is a last resort: probe it only when the primary is down AND Core cannot
+/// serve the clock (down or in IBD), and only if one is configured. Keeps the external LAN node
+/// untouched while the primary is healthy.
+fn should_probe_secondary(
+    indexer_up: bool,
+    core_up: bool,
+    core_ibd: bool,
+    secondary_configured: bool,
+) -> bool {
+    secondary_configured && !indexer_up && !(core_up && !core_ibd)
+}
+
 fn classify_mempool_congestion(fee_sat_vb: f64, network: &str) -> &'static str {
     let (low_max, high_min) = match network {
         "mainnet" => (10.0, 50.0),
@@ -1473,5 +1612,27 @@ mod tests {
         pm.merge_pending_scripthashes(txid, &[sh.to_string()]); // already present
 
         assert!(rx.try_recv().is_err(), "no push expected when no new scripthash");
+    }
+
+    #[test]
+    fn virtual_block_disarms_after_ten_blocks() {
+        assert!(!should_disarm(false, 100, 200)); // disabled → never
+        assert!(!should_disarm(true, 100, 109)); // 9 blocks in → still armed
+        assert!(should_disarm(true, 100, 110)); // exactly +10 → disarm
+        assert!(should_disarm(true, 100, 130)); // well past → disarm
+    }
+
+    #[test]
+    fn secondary_probed_only_when_primary_down_and_core_unusable() {
+        // Primary up → never probe the external node.
+        assert!(!should_probe_secondary(true, false, false, true));
+        // Primary down but Core synced → Core covers it; don't probe secondary.
+        assert!(!should_probe_secondary(false, true, false, true));
+        // Primary down, Core down → probe secondary (if configured).
+        assert!(should_probe_secondary(false, false, false, true));
+        // Primary down, Core in IBD → probe secondary.
+        assert!(should_probe_secondary(false, true, true, true));
+        // Not configured → never probe.
+        assert!(!should_probe_secondary(false, false, false, false));
     }
 }
