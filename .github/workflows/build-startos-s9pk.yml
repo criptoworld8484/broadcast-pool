@@ -48,8 +48,11 @@ jobs:
         # the `start-cli/*` release, served from start-technologies), and scanning
         # the cross-repo releases API from CI intermittently returns an error object
         # (rate limit) that breaks the jq lookup. A pinned URL is deterministic.
+        # v0.4.0-beta.9 matches the target StartOS (and start-sdk 1.5.3). Newer
+        # start-cli (1.0.x) requires a packaging "workspace" the package layout
+        # here does not use, and would break `s9pk pack`.
         env:
-          START_CLI_TAG: start-cli/v1.0.3
+          START_CLI_TAG: v0.4.0-beta.9
         run: |
           ARCH=$(uname -m)
           OS=$(uname -s | tr '[:upper:]' '[:lower:]')
