@@ -1,10 +1,10 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '0.3.17:1',
+  version: '0.3.19:0',
   releaseNotes: {
-    en_US: 'Wait for the Bitcoin Core dependency to be reachable before starting, so the network is detected correctly (fixes the dashboard showing testnet4 on a mainnet node when the dependency network was not yet ready at startup).',
-    es_ES: 'Espera a que la dependencia Bitcoin Core sea alcanzable antes de arrancar, para detectar bien la red (corrige que el panel mostrara testnet4 en un nodo mainnet cuando la red de dependencias aún no estaba lista al arrancar).',
+    en_US: 'Scheduled broadcasts survive an indexer outage: the chain clock falls back to Bitcoin Core, and optionally to a secondary indexer, so schedules keep firing. Liana UTXO-cycling via a configurable virtual block height. Dashboard: source-coloured tx table, merged TXID column, and UI refinements.',
+    es_ES: 'Las difusiones programadas sobreviven a una caída del indexador: el reloj de la cadena cae a Bitcoin Core y, opcionalmente, a un indexador secundario, para que las programaciones sigan cumpliéndose. Ciclado de UTXO de Liana mediante una altura de bloque virtual configurable. Dashboard: tabla de tx con origen coloreado, columna TXID unificada y mejoras de UI.',
   },
   migrations: {
     up: async () => {},
