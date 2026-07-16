@@ -1103,10 +1103,13 @@ impl PoolManager {
         };
 
         // Third fallback: probe the secondary indexer only when the primary is down and Core is
-        // unusable. Reads the URL from config; a fresh ElectrumClient per probe (rare path).
-        let secondary_url = {
-            let cfg = self.config.lock().ok();
-            cfg.and_then(|c| c.secondary_indexer.clone())
+        // unusable. Reads the URL + our network from config; a fresh ElectrumClient per probe
+        // (rare path).
+        let (secondary_url, secondary_network) = {
+            match self.config.lock().ok() {
+                Some(c) => (c.secondary_indexer.clone(), Some(c.network.network_type.clone())),
+                None => (None, None),
+            }
         };
         let secondary_configured = secondary_url.is_some();
         let indexer_is_up = indexer_height.is_some();
@@ -1120,9 +1123,24 @@ impl PoolManager {
             match ElectrumClient::new(&url) {
                 Ok(client) => match client.get_block_height() {
                     Ok(h) => {
-                        let mtp = client.get_median_time_past().ok();
-                        tracing::info!("Secondary indexer alive at {} (height {})", url, h);
-                        (true, Some(h), mtp)
+                        // Reject a wrong-network secondary before trusting its height: a mainnet
+                        // indexer answers ~900k blocks, which would mark testnet height-locked txs
+                        // due early. Only accept it if its genesis matches our configured network.
+                        let net_ok = secondary_network
+                            .as_ref()
+                            .map(|n| client.genesis_matches_network(n).unwrap_or(false))
+                            .unwrap_or(false);
+                        if net_ok {
+                            let mtp = client.get_median_time_past().ok();
+                            tracing::info!("Secondary indexer alive at {} (height {})", url, h);
+                            (true, Some(h), mtp)
+                        } else {
+                            tracing::warn!(
+                                "Secondary indexer {} is on a different network (genesis mismatch) — ignoring",
+                                url
+                            );
+                            (false, None, None)
+                        }
                     }
                     Err(e) => {
                         tracing::debug!("Secondary indexer probe failed: {}", e);

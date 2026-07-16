@@ -176,6 +176,39 @@ difusión: indexer principal → Core RPC → indexer secundario
   con un segundo indexador en la LAN configurado, y ver `source=SecondaryIndexer`, altura fresca y
   una tx por bloque difundiéndose. Más el pop-up de primer arranque y el banner.
 
+## ADENDA 2026-07-16 — Hallazgos del E2E y endurecimiento
+
+Prueba end-to-end en el nodo Umbrel testnet4 (rc6):
+
+- **El fallback funciona en código, verificado en vivo.** Con el indexador principal (Fulcrum
+  parado) y Bitcoin Core caídos, el pool **intenta el secundario** y, al no poder conectar,
+  **degrada limpiamente a `source=None`** con log claro (`Failed to connect to indexer at … (tried
+  TCP and SSL)`). Comprobado con dos secundarios (LAN `192.168.50.212:58887` e Internet
+  `mempool.space:40002`), mismo comportamiento correcto. De paso quedó confirmado el fallback a Core
+  (primario caído → `bitcoin_core`).
+
+- **Limitación de despliegue en Umbrel (no es bug):** el contenedor de la app en Umbrel tiene el
+  **egress restringido** — alcanza los servicios internos del nodo (`10.21.21.x`: Fulcrum, Core) y
+  web estándar (443, feed de precios), **pero NO puertos Electrum externos** (LAN o Internet:
+  50002/40002/58887…). Por tanto, en Umbrel el secundario debe ser un indexador de la **red interna**
+  del propio nodo; un indexador externo no es alcanzable desde el contenedor. En **Start9 o
+  bare-metal** (egress normal) sí funciona un secundario LAN/Internet. Documentado en el hint del
+  campo "Indexador secundario".
+
+- **Chequeo de génesis — IMPLEMENTADO (2026-07-16).** El sondeo del secundario
+  (`refresh_chain_health`) ahora valida `genesis_matches_network(network)` antes de fiarse de su
+  altura: si el génesis no casa con la red configurada, se **descarta** el secundario
+  (`secondary_up=false`, warn "different network — ignoring") en vez de leer una altura de otra red
+  (p. ej. un indexador mainnet respondiendo ~900k, que dispararía txs testnet por altura antes de
+  tiempo). El camino del **Test** (`/api/test-indexer`) ya validaba la red vía
+  `resolve_working_indexer_url` → `indexer_matches_network`; el hueco era el sondeo (el secundario
+  puede guardarse por el pop-up sin pasar Test), ahora cubierto.
+
+- **Pendiente:** demostrar el **relevo completándose** en vivo requiere un entorno donde el
+  contenedor alcance un indexador testnet4 independiente (Start9 testnet4 `192.168.50.134`, offline
+  durante la prueba; o un segundo indexador en la red interna de Umbrel). El camino está cubierto por
+  tests unitarios + revisión de rama + los dos probes en vivo con degradación correcta.
+
 ## Fuera de alcance
 
 - Enrutar el sync del monedero (historial de direcciones) al secundario — solo reloj + difusión.
