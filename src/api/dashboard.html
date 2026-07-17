@@ -847,10 +847,6 @@
                     <h3 id="indexer-banner-title"></h3>
                     <p id="indexer-banner-text"></p>
                 </div>
-                <div id="secondary-banner" class="protocol-banner" style="display:none; border-color: var(--amber); margin-top: 12px;">
-                    <h3 id="secondary-banner-title"></h3>
-                    <p id="secondary-banner-text"></p>
-                </div>
                 <div id="sparrow-readiness-banner" class="protocol-banner" style="display:none; border-color: var(--amber); margin-top: 12px;">
                     <h3 id="sparrow-readiness-title" data-i18n="sparrow_readiness_title">Sparrow setup required</h3>
                     <p id="sparrow-readiness-text"></p>
@@ -1013,34 +1009,10 @@
                                 <input type="number" id="cfg-max-delay" min="0" max="168">
                                 <div class="setting-hint" data-i18n="cfg_max_delay_hint">Maximum random delay before broadcast</div>
                             </div>
-                            <div style="margin-bottom: 22px;">
+                            <div>
                                 <label data-i18n="cfg_min_delay">Min Delay (hours)</label>
                                 <input type="number" id="cfg-min-delay" min="0" max="168">
                                 <div class="setting-hint" data-i18n="cfg_min_delay_hint">Minimum random delay before broadcast</div>
-                            </div>
-                            <div id="cfg-external-indexer-group">
-                                <label data-i18n="cfg_indexer_external">External Indexer (optional)</label>
-                                <div style="display: flex; gap: 8px; align-items: center;">
-                                    <input type="text" id="cfg-electrs" placeholder="host:50001 or host:50002" style="flex: 1;">
-                                    <button class="btn btn-outline" id="btn-test-indexer" onclick="testIndexer()" style="padding: 16px 20px; white-space: nowrap;" data-i18n="cfg_indexer_test">Test</button>
-                                    <button class="btn btn-outline" id="btn-discover-indexer" onclick="discoverIndexer()" style="padding: 16px 20px; white-space: nowrap; display: none;" data-i18n="cfg_indexer_discover">Discover</button>
-                                </div>
-                                <label style="display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 14px; cursor: pointer;">
-                                    <input type="checkbox" id="cfg-indexer-ssl" style="width: 16px; height: 16px; accent-color: var(--btc);">
-                                    <span data-i18n="cfg_indexer_ssl">Use SSL/TLS</span>
-                                </label>
-                                <div class="setting-hint" id="indexer-test-result" style="margin-top: 8px; display: none;"></div>
-                                <div class="setting-hint" id="indexer-auto-hint" style="margin-top: 8px; display: none;"></div>
-                                <div class="setting-hint" id="indexer-fallback-hint" data-i18n="cfg_indexer_fallback_hint">Only if the node indexer fails — leave empty to use the node automatically.</div>
-                            </div>
-                            <div style="margin-top: 22px;">
-                                <label data-i18n="cfg_secondary_indexer">Secondary Indexer (optional)</label>
-                                <div style="display: flex; gap: 8px; align-items: center;">
-                                    <input type="text" id="cfg-secondary-indexer" placeholder="192.168.x.x:50001" style="flex: 1;">
-                                    <button class="btn btn-outline" onclick="testSecondaryIndexer()" style="padding: 16px 20px; white-space: nowrap;" data-i18n="cfg_indexer_test">Test</button>
-                                </div>
-                                <div class="setting-hint" id="secondary-indexer-test-result" style="margin-top: 8px; display: none;"></div>
-                                <div class="setting-hint" data-i18n="cfg_secondary_indexer_hint">Used only if the primary indexer AND Bitcoin Core both fail, so schedules keep running. Another node's electrs/Fulcrum on your LAN (IP or host:port).</div>
                             </div>
                         </div>
                         <div class="setting-group" id="cfg-delay-group" style="display:none;">
@@ -1321,14 +1293,6 @@
                 cfg_indexer_status_hint_dev: 'Electrs/Fulcrum TCP (ports 50001 or 50002). Auto-detected at startup.',
                 cfg_indexer_fallback_hint: 'Only if the node indexer fails — leave empty to use the node automatically.',
                 cfg_indexer_ssl: 'Use SSL/TLS',
-                cfg_secondary_indexer: 'Secondary Indexer (optional)',
-                cfg_secondary_indexer_hint: 'Used only if the primary indexer AND Bitcoin Core both fail, so schedules keep running. Another node’s electrs/Fulcrum (IP or host:port), on the same network as this node. It must be reachable from this app — on Umbrel the app cannot reach the external LAN, so it has to be a node on Umbrel’s internal network.',
-                sec_banner_title: 'Primary indexer & Bitcoin Core down — using secondary indexer',
-                sec_banner_text: 'Reading block height and median time from your secondary indexer at {url}. Scheduled broadcasts keep running.',
-                secprompt_title: 'Add a backup indexer?',
-                secprompt_body: 'If you have another node with its own indexer (electrs/Fulcrum) on your LAN, you can set it as a backup. Broadcast Pool will use it only if your primary indexer and Bitcoin Core both fail, so your scheduled transactions still go out on time.',
-                secprompt_later: 'Later',
-                secprompt_save: 'Save',
                 cfg_indexer_auto: 'Node indexer',
                 cfg_indexer_node: 'Connected to node indexer',
                 cfg_lan_ip: 'LAN IP (wallet URL)', cfg_lan_ip_hint: 'Auto-detected at startup. Override if Sparrow cannot connect (same IP as http://umbrel).',
@@ -1455,14 +1419,6 @@
                 cfg_indexer_status_hint_dev: 'Electrs/Fulcrum TCP (puertos 50001 o 50002). Auto-detectado al arrancar.',
                 cfg_indexer_fallback_hint: 'Solo si el indexador del nodo falla — dejar vac\u00edo para usar el del nodo autom\u00e1ticamente.',
                 cfg_indexer_ssl: 'Usar SSL/TLS',
-                cfg_secondary_indexer: 'Indexador secundario (opcional)',
-                cfg_secondary_indexer_hint: 'Se usa solo si el indexador principal Y Bitcoin Core fallan, para que las programaciones sigan cumpliéndose. El electrs/Fulcrum de otro nodo (IP o host:puerto), en la misma red que este nodo. Debe ser alcanzable desde esta app — en Umbrel la app no llega a la LAN externa, así que tiene que ser un nodo de la red interna de Umbrel.',
-                sec_banner_title: 'Indexador principal y Bitcoin Core caídos — usando indexador secundario',
-                sec_banner_text: 'Leyendo la altura de bloque y el tiempo mediano de tu indexador secundario en {url}. Las difusiones programadas siguen cumpliéndose.',
-                secprompt_title: '¿Añadir un indexador de respaldo?',
-                secprompt_body: 'Si tienes otro nodo con su propio indexador (electrs/Fulcrum) en tu LAN, puedes ponerlo como respaldo. Broadcast Pool lo usará solo si tu indexador principal y Bitcoin Core fallan ambos, para que tus transacciones programadas salgan igualmente a su hora.',
-                secprompt_later: 'Más tarde',
-                secprompt_save: 'Guardar',
                 cfg_indexer_auto: 'Indexador del nodo',
                 cfg_indexer_node: 'Conectado al indexador del nodo',
                 cfg_lan_ip: 'IP LAN (URL wallet)', cfg_lan_ip_hint: 'Auto-detectada al arrancar. Override si Sparrow no conecta (misma IP que http://umbrel).',
@@ -1958,44 +1914,6 @@
             el.style.display = 'block';
         }
 
-        function updateSecondaryBanner(status) {
-            const el = document.getElementById('secondary-banner');
-            if (!el || !status) return;
-            if (status.chain_source === 'secondary_indexer') {
-                document.getElementById('secondary-banner-title').textContent = t('sec_banner_title');
-                document.getElementById('secondary-banner-text').textContent =
-                    t('sec_banner_text').replace('{url}', status.secondary_indexer_url || '—');
-                el.style.display = 'block';
-            } else {
-                el.style.display = 'none';
-            }
-        }
-
-        function maybeShowSecondaryPrompt(cfg) {
-            if (localStorage.getItem('bp-secondary-indexer-prompt')) return;
-            if (cfg && cfg.secondary_indexer_url) { // already configured → don't nag
-                localStorage.setItem('bp-secondary-indexer-prompt', '1');
-                return;
-            }
-            const overlay = document.getElementById('secondary-prompt-overlay');
-            if (overlay) overlay.classList.add('active');
-        }
-        function dismissSecondaryPrompt() {
-            localStorage.setItem('bp-secondary-indexer-prompt', '1');
-            const overlay = document.getElementById('secondary-prompt-overlay');
-            if (overlay) overlay.classList.remove('active');
-        }
-        function saveSecondaryPrompt() {
-            const url = document.getElementById('secprompt-url').value.trim();
-            fetch('/api/config', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ secondary_indexer: url })
-            }).then(r => {
-                if (!r.ok) return r.text().then(e => { throw new Error(e); });
-                toast(t('toast_saved') || 'Saved');
-            }).catch(e => toast('Error: ' + e.message))
-              .finally(() => dismissSecondaryPrompt());
-        }
 
         function updateSparrowReadinessBanner(status) {
             const el = document.getElementById('sparrow-readiness-banner');
@@ -2043,7 +1961,6 @@
                 if (statusRes.ok) {
                     const status = await statusRes.json();
                     updateIndexerBanner(status);
-                    updateSecondaryBanner(status);
                     updateSparrowReadinessBanner(status);
                 }
 
@@ -2523,23 +2440,9 @@
             }
         }
 
-        function applyIndexerConfig(cfg) {
-            document.getElementById('cfg-electrs').value = cfg.indexer_url || '';
-            const sslBox = document.getElementById('cfg-indexer-ssl');
-            if (sslBox) sslBox.checked = !!cfg.indexer_use_ssl;
-        }
-
-        function indexerSslChecked() {
-            const box = document.getElementById('cfg-indexer-ssl');
-            return box ? box.checked : false;
-        }
-
         async function loadConfig() {
             try {
                 const cfg = await (await fetch('/api/config')).json();
-                applyIndexerConfig(cfg);
-                document.getElementById('cfg-secondary-indexer').value = cfg.secondary_indexer_url || '';
-                maybeShowSecondaryPrompt(cfg);
                 document.getElementById('cfg-broadcast-mode').value = cfg.broadcast_mode || 'immediate';
                 document.getElementById('cfg-liana-vb-enabled').checked = !!cfg.liana_vb_enabled;
                 if (cfg.liana_vb_target_height) document.getElementById('cfg-liana-vb-height').value = cfg.liana_vb_target_height;
@@ -2633,100 +2536,9 @@
             }
         }
 
-        async function testIndexer() {
-            const url = document.getElementById('cfg-electrs').value.trim();
-            if (!url) {
-                showIndexerStatus('Enter a URL first', 'var(--red)');
-                return;
-            }
-            const btn = document.getElementById('btn-test-indexer');
-            const resultEl = document.getElementById('indexer-test-result');
-            btn.disabled = true;
-            btn.textContent = 'Testing...';
-            resultEl.style.display = 'none';
-
-            try {
-                const res = await fetch('/api/test-indexer', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, indexer_use_ssl: indexerSslChecked() })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    if (data.url) {
-                        document.getElementById('cfg-electrs').value = data.url;
-                    }
-                    if (data.use_ssl !== undefined) {
-                        const sslBox = document.getElementById('cfg-indexer-ssl');
-                        if (sslBox) sslBox.checked = !!data.use_ssl;
-                    }
-                    if (data.height) {
-                        showIndexerStatus(`Connected! Height: ${data.height}`, 'var(--green)');
-                    } else {
-                        showIndexerStatus(`Connected but height unavailable`, 'var(--amber)');
-                    }
-                } else {
-                    showIndexerStatus(`Error: ${data.error || 'Connection failed'}`, 'var(--red)');
-                }
-            } catch (e) {
-                showIndexerStatus(`Error: ${e.message}`, 'var(--red)');
-            } finally {
-                btn.disabled = false;
-                btn.textContent = 'Test';
-            }
-        }
-
-        function testSecondaryIndexer() {
-            const url = document.getElementById('cfg-secondary-indexer').value.trim();
-            const out = document.getElementById('secondary-indexer-test-result');
-            out.style.display = 'block';
-            out.textContent = t('cfg_checking') || 'Checking...';
-            fetch('/api/test-indexer', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ url })
-            }).then(r => r.json()).then(d => {
-                out.textContent = d.success ? '✓ ' + (d.url || url) : '✗ ' + (d.error || 'unreachable');
-                out.style.color = d.success ? 'var(--green)' : 'var(--red)';
-            }).catch(() => { out.textContent = '✗'; out.style.color = 'var(--red)'; });
-        }
-
-        function showIndexerStatus(msg, color) {
-            const el = document.getElementById('indexer-test-result');
-            el.textContent = msg;
-            el.style.color = color;
-            el.style.display = 'block';
-        }
-
-        async function discoverIndexer() {
-            const btn = document.getElementById('btn-discover-indexer');
-            btn.disabled = true;
-            btn.textContent = 'Scanning...';
-            try {
-                const res = await fetch('/api/discover-indexer', { method: 'POST' });
-                const data = await res.json();
-                if (data.indexer_url) {
-                    document.getElementById('cfg-electrs').value = data.indexer_url;
-                }
-                const color = data.success ? 'var(--green)' : 'var(--red)';
-                showIndexerStatus(data.message, color);
-                if (data.success) {
-                    await checkIndexerStatus();
-                    await loadConfig();
-                }
-            } catch (e) {
-                showIndexerStatus(`Error: ${e.message}`, 'var(--red)');
-            } finally {
-                btn.disabled = false;
-                btn.textContent = t('cfg_indexer_discover');
-            }
-        }
-
         async function saveConfig() {
             try {
                 const body = {
-                    indexer_url: appUmbrelMode ? '' : document.getElementById('cfg-electrs').value,
-                    indexer_use_ssl: indexerSslChecked(),
-                    secondary_indexer: document.getElementById('cfg-secondary-indexer').value.trim(),
                     broadcast_mode: document.getElementById('cfg-broadcast-mode').value,
                     liana_vb_enabled: document.getElementById('cfg-liana-vb-enabled').checked,
                     liana_vb_target_height: parseInt(document.getElementById('cfg-liana-vb-height').value, 10) || 0,
@@ -2812,21 +2624,5 @@
         applyTranslations();
         showWizardIfNeeded();
     </script>
-
-    <div class="modal-overlay" id="secondary-prompt-overlay">
-        <div class="modal" style="max-width: 520px;">
-            <div class="modal-header">
-                <h3 data-i18n="secprompt_title">Add a backup indexer?</h3>
-            </div>
-            <div class="modal-body">
-                <p data-i18n="secprompt_body">If you have another node with its own indexer (electrs/Fulcrum) on your LAN, you can set it as a backup. Broadcast Pool will use it only if your primary indexer and Bitcoin Core both fail, so your scheduled transactions still go out on time.</p>
-                <input type="text" id="secprompt-url" placeholder="192.168.x.x:50001" style="width:100%; margin:14px 0; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:14px 18px; border-radius:12px; font-family:var(--font-mono);">
-                <div style="display:flex; gap:10px; justify-content:flex-end;">
-                    <button class="btn btn-outline" onclick="dismissSecondaryPrompt()" data-i18n="secprompt_later">Later</button>
-                    <button class="btn" onclick="saveSecondaryPrompt()" data-i18n="secprompt_save">Save</button>
-                </div>
-            </div>
-        </div>
-    </div>
 </body>
 </html>
