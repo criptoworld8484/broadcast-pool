@@ -97,3 +97,8 @@ ALTER TABLE broadcast_pool ADD COLUMN target_price REAL;
 ALTER TABLE broadcast_pool ADD COLUMN price_currency TEXT;
 ALTER TABLE broadcast_pool ADD COLUMN price_condition TEXT;
 "#;
+
+pub const MIGRATION_007: &str = r#"
+UPDATE broadcast_pool SET broadcast_mode = 'imported'
+WHERE broadcast_mode = 'immediate' AND status = 'pending';
+"#;

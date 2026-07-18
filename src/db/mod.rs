@@ -106,6 +106,18 @@ impl Database {
             }
         }
 
+        // Migration 007: reclassify legacy imported rows (persisted as pending "immediate").
+        if let Err(e) = conn.execute_batch(schema::MIGRATION_007) {
+            tracing::warn!("Migration 007 warning (non-fatal): {}", e);
+        }
+
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn run_data_migrations(&self) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute_batch(schema::MIGRATION_007).context("Migration 007")?;
         Ok(())
     }
 
@@ -729,6 +741,51 @@ impl Database {
     pub fn execute_raw(&self, sql: &str, params: &[&dyn rusqlite::types::ToSql]) -> Result<usize> {
         let conn = self.lock_conn()?;
         conn.execute(sql, params).context("Failed to execute raw SQL")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Before Task 2, dashboard-imported txs were persisted with broadcast_mode = "immediate"
+    // (the DB default for a None mode). A real "immediate" tx is broadcast at once and never
+    // lingers as pending, so any row that is both "immediate" and "pending" is safely known to
+    // be a legacy import; migration 007 reclassifies it as "imported".
+    #[test]
+    fn migration_reclassifies_pending_immediate_as_imported() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("m.db")).unwrap();
+        // A pending tx stored under the old default mode "immediate" (how imports used to persist).
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: "00".into(), network: "testnet4".into(), nlocktime: None,
+            broadcast_mode: Some("immediate".into()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let id = db.insert_broadcast_tx(&new_tx).unwrap().id;
+        db.run_data_migrations().unwrap();
+        let tx = db.get_broadcast_tx_by_id(&id).unwrap();
+        assert_eq!(tx.broadcast_mode.as_deref(), Some("imported"));
+    }
+
+    // Running the migration twice must be safe (idempotent) — re-running it on an already
+    // reclassified row must not error and must leave the row as "imported".
+    #[test]
+    fn migration_is_idempotent_when_run_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("m2.db")).unwrap();
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: "00".into(), network: "testnet4".into(), nlocktime: None,
+            broadcast_mode: Some("immediate".into()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let id = db.insert_broadcast_tx(&new_tx).unwrap().id;
+        db.run_data_migrations().unwrap();
+        db.run_data_migrations().unwrap();
+        let tx = db.get_broadcast_tx_by_id(&id).unwrap();
+        assert_eq!(tx.broadcast_mode.as_deref(), Some("imported"));
     }
 }
 
