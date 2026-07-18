@@ -410,7 +410,7 @@
         .type-scheduled { background: #FFB34722; color: var(--amber); }
         .type-by_block { background: #F7931A22; color: var(--btc); }
         .type-manual { background: #7B68EE22; color: #B8A9FF; }
-        .type-imported { background: #4ECDC422; color: #4ECDC4; }
+        .type-imported { background: #1FA2A222; color: #4ECDC4; }
 
         .fee { font-family: var(--font-mono); font-weight: 600; }
         .time { color: var(--text-dim); font-size: 13px; }
@@ -1292,10 +1292,6 @@
                 cfg_indexer_server: 'Indexer Server',
                 cfg_indexer_status_hint: 'Connects automatically to the node electrs on Umbrel (internal Docker IP).',
                 cfg_indexer_status_hint_dev: 'Electrs/Fulcrum TCP (ports 50001 or 50002). Auto-detected at startup.',
-                cfg_indexer_fallback_hint: 'Only if the node indexer fails — leave empty to use the node automatically.',
-                cfg_indexer_ssl: 'Use SSL/TLS',
-                cfg_indexer_auto: 'Node indexer',
-                cfg_indexer_node: 'Connected to node indexer',
                 cfg_lan_ip: 'LAN IP (wallet URL)', cfg_lan_ip_hint: 'Auto-detected at startup. Override if Sparrow cannot connect (same IP as http://umbrel).',
                 cfg_wallet_sparrow: 'Sparrow / general', cfg_wallet_liana: 'Liana (dedicated port)',
                 cfg_network: 'Network', cfg_network_hint: 'Detected from Bitcoin Core at startup; override if needed', cfg_network_warning: 'Network change requires daemon restart',
@@ -1419,10 +1415,6 @@
                 cfg_indexer_server: 'Servidor Indexer',
                 cfg_indexer_status_hint: 'Se conecta autom\u00e1ticamente al electrs del nodo Umbrel (IP Docker interna).',
                 cfg_indexer_status_hint_dev: 'Electrs/Fulcrum TCP (puertos 50001 o 50002). Auto-detectado al arrancar.',
-                cfg_indexer_fallback_hint: 'Solo si el indexador del nodo falla — dejar vac\u00edo para usar el del nodo autom\u00e1ticamente.',
-                cfg_indexer_ssl: 'Usar SSL/TLS',
-                cfg_indexer_auto: 'Indexador del nodo',
-                cfg_indexer_node: 'Conectado al indexador del nodo',
                 cfg_lan_ip: 'IP LAN (URL wallet)', cfg_lan_ip_hint: 'Auto-detectada al arrancar. Override si Sparrow no conecta (misma IP que http://umbrel).',
                 cfg_wallet_sparrow: 'Sparrow / general', cfg_wallet_liana: 'Liana (puerto dedicado)',
                 cfg_network: 'Red', cfg_network_hint: 'Detectada desde Bitcoin Core al arrancar; override si hace falta', cfg_network_warning: 'El cambio de red requiere reinicio del daemon',
@@ -2004,7 +1996,7 @@
                         <td>${sourceCell(tx)}</td>
                         <td><span class="status status-${statusInfo.cls}">${statusInfo.label}</span></td>
                         <td><span class="status ${typeClass}">${typeLabel}</span></td>
-                        <td class="time">${formatPriceTrigger(tx)}${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + schedLabel + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}${(tx.broadcast_mode === 'scheduled' || tx.broadcast_mode === 'manual') && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}${tx.locktime_deferred && tx.original_scheduled_time ? '<br><span style="font-size: 10px; color: #FF8E8E;">' + t('detail_original_scheduled') + ': ' + new Date(tx.original_scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}) + '</span>' : ''}${showMtpRemaining(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">MTP: ' + formatRemaining(tx.locktime_remaining_secs) + '</span>' : ''}${tx.broadcast_mode === 'manual' && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}${tx.broadcast_mode === 'immediate' || (!tx.scheduled_time && tx.broadcast_mode !== 'by_block' && tx.broadcast_mode !== 'manual' && tx.schedule_trigger !== 'price') ? '<span style="color: var(--text-dim);">-</span>' : ''}</td>
+                        <td class="time">${formatPriceTrigger(tx)}${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + schedLabel + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}${(tx.broadcast_mode === 'scheduled' || isUserScheduledMode(tx.broadcast_mode)) && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}${tx.locktime_deferred && tx.original_scheduled_time ? '<br><span style="font-size: 10px; color: #FF8E8E;">' + t('detail_original_scheduled') + ': ' + new Date(tx.original_scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}) + '</span>' : ''}${showMtpRemaining(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">MTP: ' + formatRemaining(tx.locktime_remaining_secs) + '</span>' : ''}${isUserScheduledMode(tx.broadcast_mode) && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}${tx.broadcast_mode === 'immediate' || (!tx.scheduled_time && tx.broadcast_mode !== 'by_block' && !isUserScheduledMode(tx.broadcast_mode) && tx.schedule_trigger !== 'price') ? '<span style="color: var(--text-dim);">-</span>' : ''}</td>
                         <td class="actions">
                             <button class="btn btn-sm btn-outline" onclick="showDetail('${tx.id}')" title="${t('btn_view_details')}">&#128065;</button>
                             ${shouldShowReschedule(tx) ? `<button class="btn btn-sm" onclick="reschedule('${tx.id}')">${t('btn_reschedule')}</button>` : ''}
@@ -2056,8 +2048,8 @@
                     <span class="detail-value">
                         ${tx.schedule_trigger === 'price' && tx.target_price ? '<span style="color: var(--green);">' + t('sch_tab_price') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + (tx.price_condition === 'below' ? '\u2264' : '\u2265') + ' ' + tx.target_price.toLocaleString() + ' ' + (tx.price_currency || 'usd').toUpperCase() + (tx.current_btc_price ? ' (' + t('sch_price_now') + ': ' + tx.current_btc_price.toLocaleString() + ')' : '') + '</span>' : ''}
                         ${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + t('detail_scheduled_label') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}
-                        ${(tx.broadcast_mode === 'scheduled' || tx.broadcast_mode === 'manual') && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}
-                        ${tx.broadcast_mode === 'manual' && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}
+                        ${(tx.broadcast_mode === 'scheduled' || isUserScheduledMode(tx.broadcast_mode)) && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}
+                        ${isUserScheduledMode(tx.broadcast_mode) && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}
                         ${tx.broadcast_mode === 'immediate' ? '<span style="color: var(--text-dim);">' + t('detail_immediate_label') + '</span>' : ''}
                     </span>
                 </div>
@@ -2423,16 +2415,6 @@
                 statusHint.textContent = appUmbrelMode ? t('cfg_indexer_status_hint') : t('cfg_indexer_status_hint_dev');
             }
 
-            const autoHint = document.getElementById('indexer-auto-hint');
-            const nodeUrl = cfg.indexer_node_url || '';
-            if (autoHint && nodeUrl) {
-                const prefix = appUmbrelMode ? t('cfg_indexer_node') : t('cfg_indexer_auto');
-                autoHint.textContent = `${prefix}: ${nodeUrl}`;
-                autoHint.style.display = 'block';
-                autoHint.style.color = 'var(--green)';
-            } else if (autoHint) {
-                autoHint.style.display = 'none';
-            }
         }
 
         async function loadConfig() {
