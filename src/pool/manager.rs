@@ -600,10 +600,9 @@ impl PoolManager {
         };
 
         for tx in self.get_pending_by_scheduled_time(&network)? {
-            if !matches!(
-                tx.broadcast_mode.as_deref(),
-                Some("scheduled") | Some("manual")
-            ) {
+            if !(is_user_scheduled_mode(tx.broadcast_mode.as_deref())
+                || tx.broadcast_mode.as_deref() == Some("scheduled"))
+            {
                 continue;
             }
             if tx.schedule_trigger.as_deref() == Some("price") {
@@ -1552,6 +1551,38 @@ mod tests {
             .expect("imported tx should accept a price trigger");
         let tx = pm.get_db().get_broadcast_tx_by_id(&id).expect("reload");
         assert_eq!(tx.schedule_trigger.as_deref(), Some("price"));
+    }
+
+    // The scheduler's "pending due" query must surface imported txs exactly like manual/scheduled
+    // ones. get_pending_by_scheduled_time's SQL already lists 'imported' in its IN(...) clause;
+    // this test guards that SQL+filter contract end-to-end so run_scheduler_tick's in-loop guard
+    // (which independently re-checks broadcast_mode) can't silently drop imported rows again.
+    #[test]
+    fn get_pending_by_scheduled_time_includes_imported() {
+        let (pm, _dir) = test_manager();
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: "00".to_string(),
+            network: "testnet4".to_string(),
+            nlocktime: None,
+            broadcast_mode: Some("imported".to_string()),
+            scheduled_time: Some(past),
+            target_fee_rate: None,
+            source_label: None,
+            destination_address: None,
+            utxo_count: Some(1),
+            total_value_btc: None,
+            replacement_of: None,
+        };
+        let id = pm.get_db().insert_broadcast_tx(&new_tx).expect("insert").id;
+
+        let pending = pm
+            .get_pending_by_scheduled_time("testnet4")
+            .expect("query pending by scheduled time");
+        assert!(
+            pending.iter().any(|tx| tx.id == id),
+            "imported tx with a past scheduled_time must be returned as pending-due"
+        );
     }
 
     #[test]
