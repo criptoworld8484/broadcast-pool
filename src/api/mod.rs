@@ -290,7 +290,7 @@ async fn import_transaction(
         tx_hex: req.tx_hex,
         network: req.network.unwrap_or(network),
         nlocktime: None,
-        broadcast_mode: None,
+        broadcast_mode: Some("imported".to_string()),
         scheduled_time: None,
         target_fee_rate: req.target_fee_rate,
         source_label: req.label,

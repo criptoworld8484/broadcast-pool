@@ -57,6 +57,12 @@ pub struct PoolManager {
     scripthash_notifications: tokio::sync::broadcast::Sender<ScripthashNotification>,
 }
 
+/// A tx the user schedules by hand from the dashboard: retained wallet txs under manual mode and
+/// dashboard-imported txs. Both offer date/time AND price triggers; they differ only in the label.
+pub fn is_user_scheduled_mode(mode: Option<&str>) -> bool {
+    matches!(mode, Some("manual") | Some("imported"))
+}
+
 impl PoolManager {
     pub fn new(
         db: Arc<Database>,
@@ -134,7 +140,7 @@ impl PoolManager {
             || tx.scheduled_time.is_some()
             || tx.schedule_trigger.as_deref() == Some("price")
             || tx.broadcast_mode.as_deref() == Some("scheduled")
-            || tx.broadcast_mode.as_deref() == Some("manual");
+            || is_user_scheduled_mode(tx.broadcast_mode.as_deref());
 
         let defer_until = if is_reschedule {
             Some(scheduled_str.as_str())
@@ -174,8 +180,8 @@ impl PoolManager {
         if !matches!(tx.status, TxStatus::Pending | TxStatus::Scheduled) {
             anyhow::bail!("Cannot set price trigger on transaction in status {}", tx.status.as_str());
         }
-        if tx.broadcast_mode.as_deref() != Some("manual") {
-            anyhow::bail!("Price trigger scheduling is only available for manual (pending) transactions");
+        if !is_user_scheduled_mode(tx.broadcast_mode.as_deref()) {
+            anyhow::bail!("Price trigger scheduling is only available for manual/imported (pending) transactions");
         }
         if tx.nlocktime.is_some_and(|n| n > 0) {
             anyhow::bail!("Price trigger scheduling is only available when nLockTime is disabled (0)");
@@ -780,7 +786,7 @@ impl PoolManager {
 
     fn tx_has_broadcast_schedule(tx: &BroadcastTx) -> bool {
         tx.broadcast_mode.as_deref() == Some("scheduled")
-            || tx.broadcast_mode.as_deref() == Some("manual")
+            || is_user_scheduled_mode(tx.broadcast_mode.as_deref())
             || tx.scheduled_time.is_some()
             || tx.defer_until.is_some()
             || tx.broadcast_missed_at.is_some()
@@ -1518,5 +1524,46 @@ mod tests {
         assert!(!should_disarm(true, 100, 109)); // 9 blocks in → still armed
         assert!(should_disarm(true, 100, 110)); // exactly +10 → disarm
         assert!(should_disarm(true, 100, 130)); // well past → disarm
+    }
+
+    fn insert_imported(pm: &PoolManager, nlocktime: Option<u64>) -> String {
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: "00".to_string(),
+            network: "testnet4".to_string(),
+            nlocktime,
+            broadcast_mode: Some("imported".to_string()),
+            scheduled_time: None,
+            target_fee_rate: None,
+            source_label: None,
+            destination_address: None,
+            utxo_count: Some(1),
+            total_value_btc: None,
+            replacement_of: None,
+        };
+        pm.get_db().insert_broadcast_tx(&new_tx).expect("insert").id
+    }
+
+    #[test]
+    fn imported_tx_can_be_price_scheduled() {
+        let (pm, _dir) = test_manager();
+        let id = insert_imported(&pm, None);
+        // Imported must be accepted by the price-trigger scheduler, exactly like manual.
+        pm.schedule_by_price(&id, 100_000.0, "usd", "above", 5.0)
+            .expect("imported tx should accept a price trigger");
+        let tx = pm.get_db().get_broadcast_tx_by_id(&id).expect("reload");
+        assert_eq!(tx.schedule_trigger.as_deref(), Some("price"));
+    }
+
+    #[test]
+    fn immediate_tx_still_rejects_price_schedule() {
+        let (pm, _dir) = test_manager();
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: "00".to_string(), network: "testnet4".to_string(), nlocktime: None,
+            broadcast_mode: Some("immediate".to_string()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let id = pm.get_db().insert_broadcast_tx(&new_tx).expect("insert").id;
+        assert!(pm.schedule_by_price(&id, 100_000.0, "usd", "above", 5.0).is_err());
     }
 }

@@ -371,7 +371,7 @@ impl Database {
         let conn = self.lock_conn()?;
         let now = Utc::now();
         let sql = format!(
-            "SELECT {BROADCAST_SELECT} FROM broadcast_pool WHERE status = 'pending' AND broadcast_mode IN ('scheduled', 'manual') AND scheduled_time IS NOT NULL AND network = ?1"
+            "SELECT {BROADCAST_SELECT} FROM broadcast_pool WHERE status = 'pending' AND broadcast_mode IN ('scheduled', 'manual', 'imported') AND scheduled_time IS NOT NULL AND network = ?1"
         );
         let mut stmt = conn
             .prepare(&sql)
