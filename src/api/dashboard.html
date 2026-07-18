@@ -410,6 +410,7 @@
         .type-scheduled { background: #FFB34722; color: var(--amber); }
         .type-by_block { background: #F7931A22; color: var(--btc); }
         .type-manual { background: #7B68EE22; color: #B8A9FF; }
+        .type-imported { background: #4ECDC422; color: #4ECDC4; }
 
         .fee { font-family: var(--font-mono); font-weight: 600; }
         .time { color: var(--text-dim); font-size: 13px; }
@@ -1314,6 +1315,7 @@
                 detail_next_attempt: 'Next attempt',
                 detail_locktime_ready: 'ready',
                 detail_programmed: 'Programmed', detail_scheduled_label: 'scheduled', detail_by_block_label: 'scheduled — Block #', detail_immediate_label: 'Immediate',
+                type_imported: 'Imported', type_manual: 'Manual',
                 detail_view_mempool: 'View on mempool', detail_copy_poolid: 'Copy Pool ID', detail_copy_txid: 'Copy TXID', detail_copy_hex: 'Copy TX Hex',
                 sch_title: 'Schedule Broadcast', sch_reschedule_title: 'Reschedule Broadcast',
                 sch_nlocktime_warning: 'The nLockTime in the signed transaction does not change; the network will only accept the TX when chain MTP reaches it.',
@@ -1440,6 +1442,7 @@
                 detail_next_attempt: 'Pr\u00f3ximo intento',
                 detail_locktime_ready: 'listo',
                 detail_programmed: 'Programada', detail_scheduled_label: 'programada', detail_by_block_label: 'programada \u2014 Block #', detail_immediate_label: 'Inmediata',
+                type_imported: 'Importada', type_manual: 'Manual',
                 detail_view_mempool: 'Ver en mempool', detail_copy_poolid: 'Copiar ID del Pool', detail_copy_txid: 'Copiar TXID', detail_copy_hex: 'Copiar Hex TX',
                 sch_title: 'Programar Transmisi\u00f3n', sch_reschedule_title: 'Reprogramar emisi\u00f3n',
                 sch_nlocktime_warning: 'El nLockTime de la TX firmada no cambia; la red solo aceptar\u00e1 la TX cuando el MTP de cadena lo alcance.',
@@ -1691,10 +1694,13 @@
             return { cls: tx.status, label: tx.status };
         }
 
+        // Mirror of the backend is_user_scheduled_mode: manual and imported schedule identically.
+        function isUserScheduledMode(mode) { return mode === 'manual' || mode === 'imported'; }
+
         function shouldShowReschedule(tx) {
             if (tx.status === 'broadcast' || tx.status === 'confirmed') return false;
             if (tx.can_reschedule) return true;
-            if (tx.broadcast_mode === 'manual' && tx.status === 'pending') {
+            if (isUserScheduledMode(tx.broadcast_mode) && tx.status === 'pending') {
                 return !!(tx.scheduled_time || tx.schedule_trigger === 'price');
             }
             return (tx.status === 'pending' || tx.status === 'scheduled')
@@ -1705,13 +1711,13 @@
         function shouldShowSchedule(tx) {
             if (tx.status !== 'pending') return false;
             if (tx.schedule_trigger === 'price') return false;
-            if (tx.broadcast_mode === 'manual') return !tx.scheduled_time;
+            if (isUserScheduledMode(tx.broadcast_mode)) return !tx.scheduled_time;
             return tx.broadcast_mode !== 'by_block' && !tx.scheduled_time;
         }
 
         function canUsePriceTrigger(tx) {
             if (!tx || tx.status === 'broadcast' || tx.status === 'confirmed') return false;
-            if (tx.broadcast_mode !== 'manual') return false;
+            if (!isUserScheduledMode(tx.broadcast_mode)) return false;
             if (tx.nlocktime && tx.nlocktime > 0) return false;
             return true;
         }
@@ -1984,7 +1990,8 @@
                     const txidCell = tx.txid
                         ? `<a class="mempool-link" href="${mempoolUrl(tx.txid, tx.network)}" target="_blank" title="View on mempool.space">${txidShort} &#8599;</a><span class="copy-icon" style="cursor:pointer; margin-left:6px;" onclick="copyText('${tx.txid}')" title="${t('detail_copy_txid')}">&#128203;</span>`
                         : `<span style="color: var(--text-dim);">-</span>`;
-                    const typeLabel = tx.broadcast_mode || '-';
+                    const typeKey = tx.broadcast_mode ? `type_${tx.broadcast_mode}` : '';
+                    const typeLabel = typeKey && i18n[currentLang][typeKey] ? t(typeKey) : (tx.broadcast_mode || '-');
                     const typeClass = tx.broadcast_mode ? `type-${tx.broadcast_mode}` : '';
                     const schedLabel = t('detail_scheduled_label');
                     const byBlockLabel = t('detail_by_block_label');
