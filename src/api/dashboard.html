@@ -1288,7 +1288,7 @@
                 protocol_banner_title: 'Virtual Mempool Active',
                 protocol_banner_text: 'Transactions from your wallet are retained locally and shown as pending. Broadcast happens when the scheduler triggers (time, block, price, or immediate).',
                 cfg_default_delay: 'Default Delay (hours)', cfg_delay_hint: 'For scheduled mode, delay before broadcast',
-                cfg_indexer_server: 'Indexer Server', cfg_indexer_external: 'External Indexer (optional)', cfg_indexer_test: 'Test', cfg_indexer_discover: 'Discover',
+                cfg_indexer_server: 'Indexer Server',
                 cfg_indexer_status_hint: 'Connects automatically to the node electrs on Umbrel (internal Docker IP).',
                 cfg_indexer_status_hint_dev: 'Electrs/Fulcrum TCP (ports 50001 or 50002). Auto-detected at startup.',
                 cfg_indexer_fallback_hint: 'Only if the node indexer fails — leave empty to use the node automatically.',
@@ -1414,7 +1414,7 @@
                 protocol_banner_title: 'Mempool Virtual Activo',
                 protocol_banner_text: 'Las transacciones de tu wallet se retienen localmente y aparecen como pendientes. La transmisi\u00f3n ocurre cuando el scheduler lo dispara (tiempo, bloque, precio o inmediato).',
                 cfg_default_delay: 'Retraso Predeterminado (horas)', cfg_delay_hint: 'Para modo programado, retraso antes de transmisi\u00f3n',
-                cfg_indexer_server: 'Servidor Indexer', cfg_indexer_external: 'Indexador externo (opcional)', cfg_indexer_test: 'Probar', cfg_indexer_discover: 'Detectar',
+                cfg_indexer_server: 'Servidor Indexer',
                 cfg_indexer_status_hint: 'Se conecta autom\u00e1ticamente al electrs del nodo Umbrel (IP Docker interna).',
                 cfg_indexer_status_hint_dev: 'Electrs/Fulcrum TCP (puertos 50001 o 50002). Auto-detectado al arrancar.',
                 cfg_indexer_fallback_hint: 'Solo si el indexador del nodo falla — dejar vac\u00edo para usar el del nodo autom\u00e1ticamente.',
@@ -2410,18 +2410,6 @@
             }
 
             appUmbrelMode = !!cfg.umbrel_mode;
-            const externalGroup = document.getElementById('cfg-external-indexer-group');
-            if (externalGroup) {
-                externalGroup.style.display = appUmbrelMode ? 'none' : '';
-            }
-            const discoverBtn = document.getElementById('btn-discover-indexer');
-            if (discoverBtn) {
-                discoverBtn.style.display = appUmbrelMode ? 'none' : '';
-            }
-            const fallbackHint = document.getElementById('indexer-fallback-hint');
-            if (fallbackHint) {
-                fallbackHint.style.display = appUmbrelMode ? 'block' : 'none';
-            }
 
             const statusHint = document.getElementById('indexer-status-hint');
             if (statusHint) {
