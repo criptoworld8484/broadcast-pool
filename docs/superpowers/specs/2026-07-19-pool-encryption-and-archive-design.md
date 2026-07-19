@@ -88,11 +88,27 @@ campos (solo se añade `row_mac`).
   `row_mac = mac(keyfile_key, canonical(id, status, broadcast_mode, scheduled_time, nlocktime,
   target_price, price_condition, schedule_trigger, tx_hex_cipher, destination_cipher))`.
 - Al leer una fila para **actuar** (scheduler: decidir difusión) se verifica el `row_mac`. Si no
-  cuadra → la fila se marca en memoria como `tampered`, **no se difunde**, se registra
-  `tracing::error!` y se expone un flag en la API/UI ("registro manipulado, revisar"). No se
-  borra el dato.
+  cuadra → la fila se marca en memoria como `tampered`, se registra `tracing::error!` y **se
+  entra en MODO SEGURO** (ver abajo). No se borra el dato.
 - Filas legado sin `row_mac`: se les calcula al vuelo en la migración de arranque (ver abajo);
   a partir de ahí quedan protegidas.
+
+### Modo seguro (respuesta estricta a manipulación)
+
+Detectar cualquier fila manipulada se trata como un incidente de integridad del nodo, no como un
+fallo de una tx aislada:
+
+- Al detectar el primer `row_mac` inválido, el scheduler entra en **modo seguro**: **se detiene
+  TODA la difusión** (de esa red) — no solo la tx afectada — hasta que el admin lo revise. Un
+  flag global en memoria (`Arc<AtomicBool>` / estado compartido) gobierna el halt.
+- El dashboard **sigue accesible** (para poder investigar): muestra una alerta prominente con la
+  lista de filas manipuladas (`id`, campos afectados) y un botón de reconocimiento.
+- `POST /api/security/acknowledge` (acción del admin): tras revisar, sale del modo seguro y
+  reanuda la difusión. Opcionalmente recalcula los `row_mac` de las filas reconocidas para
+  re-sellarlas (decisión de implementación; por defecto exige revisión manual antes de re-sellar).
+- `/api/status` expone `safe_mode: bool` y `tampered_ids: [..]`.
+- Persistencia del estado: el modo seguro vive en memoria; si el proceso reinicia, la
+  verificación se repite en el siguiente tick y volverá a activarse si la manipulación persiste.
 
 ### Password RPC en `config.toml` (A3)
 
@@ -168,11 +184,12 @@ re-serializados a JSON) cifrado con la `archive_key`. En claro solo `network` y 
 - Nuevas rutas: `POST /api/archive/unlock`, `POST /api/archive/lock`,
   `GET /api/archive`, `GET /api/archive/{id}`, y `POST /api/archive/set-password` (setup /
   cambio de password del archivo).
+- Nueva ruta de integridad: `POST /api/security/acknowledge` (salir de modo seguro).
 - `dashboard.html`: nueva pestaña "Archivo" con estados bloqueado/desbloqueado, formulario de
-  password, listado paginado y modal de detalle; i18n en/es. Indicador de "registro manipulado"
-  en la tabla del pool cuando `row_mac` falla.
-- `/api/status`: exponer `archive_locked: bool` y `archive_password_set: bool` para que la UI
-  sepa qué mostrar.
+  password, listado paginado y modal de detalle; i18n en/es. Alerta prominente de **modo seguro**
+  con la lista de registros manipulados y botón de reconocimiento cuando `row_mac` falla.
+- `/api/status`: exponer `archive_locked: bool`, `archive_password_set: bool`, `safe_mode: bool`
+  y `tampered_ids: [..]` para que la UI sepa qué mostrar.
 
 ## No incluido (YAGNI)
 
@@ -207,7 +224,8 @@ re-serializados a JSON) cifrado con la `archive_key`. En claro solo `network` y 
   lectura devuelve el plaintext original; `row_mac` presente; manipular una columna de
   programación en crudo → la verificación falla y la fila se marca `tampered` y no se difunde;
   config RPC password se persiste cifrado y se descifra al cargar; migración idempotente cifra
-  filas legado.
+  filas legado. **Modo seguro:** manipular una fila hace que el scheduler NO difunda ninguna tx
+  (halt global), `safe_mode=true`; `acknowledge` reanuda.
 - **B**: `set-password` guarda salt+verifier y no la clave; `unlock` con password correcto/incorrecto;
   retención mueve solo terminales > N días y borra del pool; con archivo bloqueado la retención
   no toca nada; `GET /api/archive*` exige desbloqueo; el `blob` no contiene texto en claro
