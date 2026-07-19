@@ -292,6 +292,71 @@ impl Database {
         .context("Failed to get broadcast tx")
     }
 
+    /// Recompute `row_mac` from the CURRENTLY stored MAC-covered column values for `id` and
+    /// rewrite it. Must be called by every mutator that changes a MAC-covered column
+    /// (status, broadcast_mode, scheduled_time, nlocktime, target_price, schedule_trigger,
+    /// price_condition, tx_hex, destination_address) so a legitimate write doesn't leave
+    /// `row_mac` stale and get flagged as tampered on the next read.
+    ///
+    /// Callers MUST have already released their own `lock_conn()` guard before calling this —
+    /// `Mutex<Connection>` is not reentrant, so an overlapping lock would deadlock.
+    fn reseal_row_mac(&self, id: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        let (status, mode, scheduled, nlocktime, target_price, schedule_trigger, price_condition, enc_tx_hex, enc_dest): (
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<f64>,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT status, broadcast_mode, scheduled_time, nlocktime, target_price, schedule_trigger, price_condition, tx_hex, destination_address FROM broadcast_pool WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .context("Failed to load row for row_mac reseal")?;
+
+        let row_mac = hex::encode(crate::crypto::mac(
+            &self.key,
+            &row_mac_input(
+                id,
+                &status,
+                mode.as_deref().unwrap_or(""),
+                scheduled.as_deref().unwrap_or(""),
+                nlocktime,
+                &target_price.map(|p| p.to_string()).unwrap_or_default(),
+                schedule_trigger.as_deref().unwrap_or(""),
+                price_condition.as_deref().unwrap_or(""),
+                &enc_tx_hex,
+                enc_dest.as_deref().unwrap_or(""),
+            ),
+        ));
+
+        conn.execute(
+            "UPDATE broadcast_pool SET row_mac = ?1 WHERE id = ?2",
+            params![row_mac, id],
+        )
+        .context("Failed to reseal row_mac")?;
+
+        Ok(())
+    }
+
     pub fn list_broadcast_txs(&self, status_filter: Option<&str>, network: &str, limit: i32) -> Result<Vec<BroadcastTx>> {
         let conn = self.lock_conn()?;
 
@@ -321,40 +386,49 @@ impl Database {
     }
 
     pub fn update_tx_status(&self, id: &str, status: TxStatus, error: Option<&str>) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE broadcast_pool SET status = ?1, error_message = ?2, updated_at = ?3 WHERE id = ?4",
-            params![status.as_str(), error, now, id],
-        )
-        .context("Failed to update tx status")?;
+        {
+            let conn = self.lock_conn()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE broadcast_pool SET status = ?1, error_message = ?2, updated_at = ?3 WHERE id = ?4",
+                params![status.as_str(), error, now, id],
+            )
+            .context("Failed to update tx status")?;
+        }
+        self.reseal_row_mac(id)?;
         Ok(())
     }
 
     /// Move a failed tx back to scheduled so the scheduler can retry broadcast.
     pub fn reset_failed_to_scheduled(&self, id: &str) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = Utc::now().to_rfc3339();
-        let updated = conn
-            .execute(
-                "UPDATE broadcast_pool SET status = 'scheduled', error_message = NULL, updated_at = ?1 WHERE id = ?2 AND status = 'failed'",
-                params![now, id],
-            )
-            .context("Failed to reset failed tx to scheduled")?;
-        if updated == 0 {
-            anyhow::bail!("Transaction {} is not in failed state", id);
+        {
+            let conn = self.lock_conn()?;
+            let now = Utc::now().to_rfc3339();
+            let updated = conn
+                .execute(
+                    "UPDATE broadcast_pool SET status = 'scheduled', error_message = NULL, updated_at = ?1 WHERE id = ?2 AND status = 'failed'",
+                    params![now, id],
+                )
+                .context("Failed to reset failed tx to scheduled")?;
+            if updated == 0 {
+                anyhow::bail!("Transaction {} is not in failed state", id);
+            }
         }
+        self.reseal_row_mac(id)?;
         Ok(())
     }
 
     pub fn mark_broadcast(&self, id: &str, txid: &str, fee_rate: f64) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE broadcast_pool SET status = 'broadcast', txid = ?1, actual_fee_rate = ?2, broadcast_at = ?3, updated_at = ?3, broadcast_missed_at = NULL, defer_until = NULL WHERE id = ?4",
-            params![txid, fee_rate, now, id],
-        )
-        .context("Failed to mark as broadcast")?;
+        {
+            let conn = self.lock_conn()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE broadcast_pool SET status = 'broadcast', txid = ?1, actual_fee_rate = ?2, broadcast_at = ?3, updated_at = ?3, broadcast_missed_at = NULL, defer_until = NULL WHERE id = ?4",
+                params![txid, fee_rate, now, id],
+            )
+            .context("Failed to mark as broadcast")?;
+        }
+        self.reseal_row_mac(id)?;
         Ok(())
     }
 
@@ -377,13 +451,16 @@ impl Database {
     }
 
     pub fn mark_confirmed(&self, id: &str, block_height: u64) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE broadcast_pool SET status = 'confirmed', block_height = ?1, confirmed_at = ?2, updated_at = ?2 WHERE id = ?3",
-            params![block_height, now, id],
-        )
-        .context("Failed to mark as confirmed")?;
+        {
+            let conn = self.lock_conn()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE broadcast_pool SET status = 'confirmed', block_height = ?1, confirmed_at = ?2, updated_at = ?2 WHERE id = ?3",
+                params![block_height, now, id],
+            )
+            .context("Failed to mark as confirmed")?;
+        }
+        self.reseal_row_mac(id)?;
         Ok(())
     }
 
@@ -438,13 +515,16 @@ impl Database {
         defer_until: Option<&str>,
         fee_rate: f64,
     ) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE broadcast_pool SET status = 'scheduled', scheduled_time = ?1, defer_until = ?2, target_fee_rate = ?3, error_message = NULL, schedule_trigger = 'datetime', target_price = NULL, price_currency = NULL, price_condition = NULL, updated_at = ?4 WHERE id = ?5",
-            params![scheduled_time, defer_until, fee_rate, now, id],
-        )
-        .context("Failed to update reschedule")?;
+        {
+            let conn = self.lock_conn()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE broadcast_pool SET status = 'scheduled', scheduled_time = ?1, defer_until = ?2, target_fee_rate = ?3, error_message = NULL, schedule_trigger = 'datetime', target_price = NULL, price_currency = NULL, price_condition = NULL, updated_at = ?4 WHERE id = ?5",
+                params![scheduled_time, defer_until, fee_rate, now, id],
+            )
+            .context("Failed to update reschedule")?;
+        }
+        self.reseal_row_mac(id)?;
         Ok(())
     }
 
@@ -456,13 +536,16 @@ impl Database {
         price_condition: &str,
         fee_rate: f64,
     ) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE broadcast_pool SET status = 'pending', scheduled_time = NULL, defer_until = NULL, target_fee_rate = ?1, error_message = NULL, schedule_trigger = 'price', target_price = ?2, price_currency = ?3, price_condition = ?4, updated_at = ?5 WHERE id = ?6",
-            params![fee_rate, target_price, price_currency, price_condition, now, id],
-        )
-        .context("Failed to update price schedule")?;
+        {
+            let conn = self.lock_conn()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE broadcast_pool SET status = 'pending', scheduled_time = NULL, defer_until = NULL, target_fee_rate = ?1, error_message = NULL, schedule_trigger = 'price', target_price = ?2, price_currency = ?3, price_condition = ?4, updated_at = ?5 WHERE id = ?6",
+                params![fee_rate, target_price, price_currency, price_condition, now, id],
+            )
+            .context("Failed to update price schedule")?;
+        }
+        self.reseal_row_mac(id)?;
         Ok(())
     }
 
@@ -560,37 +643,46 @@ impl Database {
     }
 
     pub fn mark_due(&self, id: &str) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE broadcast_pool SET status = 'scheduled', scheduled_time = ?1, updated_at = ?1 WHERE id = ?2",
-            params![now, id],
-        )
-        .context("Failed to mark tx as due")?;
+        {
+            let conn = self.lock_conn()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE broadcast_pool SET status = 'scheduled', scheduled_time = ?1, updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )
+            .context("Failed to mark tx as due")?;
+        }
+        self.reseal_row_mac(id)?;
         Ok(())
     }
 
     /// Price trigger fired: ready for broadcast loop (clears price-only waiting state).
     pub fn mark_due_from_price_trigger(&self, id: &str) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "UPDATE broadcast_pool SET status = 'scheduled', scheduled_time = ?1, schedule_trigger = 'datetime', updated_at = ?2 WHERE id = ?3",
-            params![now, now, id],
-        )
-        .context("Failed to mark price-triggered tx as due")?;
+        {
+            let conn = self.lock_conn()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE broadcast_pool SET status = 'scheduled', scheduled_time = ?1, schedule_trigger = 'datetime', updated_at = ?2 WHERE id = ?3",
+                params![now, now, id],
+            )
+            .context("Failed to mark price-triggered tx as due")?;
+        }
+        self.reseal_row_mac(id)?;
         Ok(())
     }
 
     pub fn mark_due_with_schedule(&self, id: &str, scheduled_time: &DateTime<Utc>) -> Result<()> {
-        let conn = self.lock_conn()?;
-        let now = Utc::now().to_rfc3339();
-        let scheduled = scheduled_time.to_rfc3339();
-        conn.execute(
-            "UPDATE broadcast_pool SET status = 'scheduled', scheduled_time = ?1, updated_at = ?2 WHERE id = ?3",
-            params![scheduled, now, id],
-        )
-        .context("Failed to mark tx as due with schedule")?;
+        {
+            let conn = self.lock_conn()?;
+            let now = Utc::now().to_rfc3339();
+            let scheduled = scheduled_time.to_rfc3339();
+            conn.execute(
+                "UPDATE broadcast_pool SET status = 'scheduled', scheduled_time = ?1, updated_at = ?2 WHERE id = ?3",
+                params![scheduled, now, id],
+            )
+            .context("Failed to mark tx as due with schedule")?;
+        }
+        self.reseal_row_mac(id)?;
         Ok(())
     }
 
@@ -1082,6 +1174,75 @@ mod tests {
             "UPDATE broadcast_pool SET scheduled_time='1999-01-01T00:00:00Z' WHERE id=?1",
             params![stored.id]).unwrap();
         assert_eq!(db.get_broadcast_tx_by_id(&stored.id).unwrap().tampered, Some(true));
+    }
+
+    // A legitimate status transition (pending -> ... -> confirmed) must NOT be flagged as
+    // tampered: row_mac has to be recomputed on every MAC-covered-column update, not just at
+    // insert. Otherwise normal state transitions would falsely trip tamper detection and, via
+    // Task 5's safe-mode, halt all broadcasting.
+    #[test]
+    fn status_update_does_not_falsely_flag_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("rm1.db")).unwrap();
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: tx_hex_with_output_sats(&[10_000]), network: "testnet4".into(),
+            nlocktime: None, broadcast_mode: Some("imported".into()),
+            scheduled_time: None, target_fee_rate: None,
+            source_label: None, destination_address: None, utxo_count: Some(1),
+            total_value_btc: None, replacement_of: None,
+        };
+        let stored = db.insert_broadcast_tx(&new_tx).unwrap();
+
+        db.update_tx_status(&stored.id, TxStatus::Confirmed, None).unwrap();
+        let tx = db.get_broadcast_tx_by_id(&stored.id).unwrap();
+        assert_ne!(tx.tampered, Some(true), "legitimate status update must not be flagged as tampered");
+        assert_eq!(tx.status, TxStatus::Confirmed);
+    }
+
+    // mark_broadcast changes `status` (a MAC-covered column) but not through update_tx_status;
+    // it must reseal row_mac too.
+    #[test]
+    fn mark_broadcast_does_not_falsely_flag_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("rm2.db")).unwrap();
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: tx_hex_with_output_sats(&[10_000]), network: "testnet4".into(),
+            nlocktime: None, broadcast_mode: Some("imported".into()),
+            scheduled_time: None, target_fee_rate: None,
+            source_label: None, destination_address: None, utxo_count: Some(1),
+            total_value_btc: None, replacement_of: None,
+        };
+        let stored = db.insert_broadcast_tx(&new_tx).unwrap();
+
+        db.mark_broadcast(&stored.id, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", 5.0).unwrap();
+        let tx = db.get_broadcast_tx_by_id(&stored.id).unwrap();
+        assert_ne!(tx.tampered, Some(true), "mark_broadcast must not be flagged as tampered");
+        assert_eq!(tx.status, TxStatus::Broadcast);
+    }
+
+    // update_reschedule and update_price_schedule mutate scheduled_time/schedule_trigger/
+    // target_price/price_condition — all MAC-covered. Both must reseal row_mac.
+    #[test]
+    fn reschedule_and_price_schedule_do_not_falsely_flag_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("rm3.db")).unwrap();
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: tx_hex_with_output_sats(&[10_000]), network: "testnet4".into(),
+            nlocktime: None, broadcast_mode: Some("scheduled".into()),
+            scheduled_time: Some(chrono::Utc::now()), target_fee_rate: None,
+            source_label: None, destination_address: None, utxo_count: Some(1),
+            total_value_btc: None, replacement_of: None,
+        };
+        let stored = db.insert_broadcast_tx(&new_tx).unwrap();
+
+        let new_time = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
+        db.update_reschedule(&stored.id, &new_time, None, 3.0).unwrap();
+        let tx = db.get_broadcast_tx_by_id(&stored.id).unwrap();
+        assert_ne!(tx.tampered, Some(true), "reschedule must not be flagged as tampered");
+
+        db.update_price_schedule(&stored.id, 50000.0, "USD", "above", 3.0).unwrap();
+        let tx = db.get_broadcast_tx_by_id(&stored.id).unwrap();
+        assert_ne!(tx.tampered, Some(true), "price schedule update must not be flagged as tampered");
     }
 
     // Running the migration twice must be safe (idempotent) — re-running it on an already
