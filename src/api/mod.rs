@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Json},
     routing::{get, post},
@@ -43,6 +43,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/estimate-fee", post(estimate_fee))
         .route("/api/indexer-debug", get(get_indexer_debug))
         .route("/api/btc-price", get(get_btc_price))
+        .route("/api/archive/set-password", post(archive_set_password))
+        .route("/api/archive/unlock", post(archive_unlock))
+        .route("/api/archive/lock", post(archive_lock))
+        .route("/api/archive", get(list_archive))
+        .route("/api/archive/{id}", get(get_archive_item))
         .with_state(state)
 }
 
@@ -449,6 +454,10 @@ struct StatusResponse {
     safe_mode: bool,
     /// Ids of the tampered rows that triggered safe mode, for the dashboard banner.
     tampered_ids: Vec<String>,
+    /// True when the archive encryption key is not currently cached in memory.
+    archive_locked: bool,
+    /// True once an archive password has been configured (salt+verifier persisted).
+    archive_password_set: bool,
 }
 
 async fn security_acknowledge(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -733,6 +742,8 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         liana_vb_disarm_height,
         safe_mode: state.pool_manager.is_safe_mode(),
         tampered_ids: state.pool_manager.tampered_ids(),
+        archive_locked: !state.archive_keys.is_unlocked(),
+        archive_password_set: state.archive_keys.password_is_set(&state.db).unwrap_or(false),
     }))
 }
 
@@ -807,6 +818,125 @@ async fn get_indexer_debug(
     Ok(Json(diagnostics))
 }
 
+#[derive(Deserialize)]
+struct ArchivePasswordRequest {
+    password: String,
+}
+
+async fn archive_set_password(
+    State(state): State<AppState>,
+    Json(req): Json<ArchivePasswordRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let already_set = state
+        .archive_keys
+        .password_is_set(&state.db)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if already_set {
+        return Err((
+            StatusCode::CONFLICT,
+            "archive password is already set".to_string(),
+        ));
+    }
+    state
+        .archive_keys
+        .set_password(&state.db, &req.password)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn archive_unlock(
+    State(state): State<AppState>,
+    Json(req): Json<ArchivePasswordRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let is_set = state
+        .archive_keys
+        .password_is_set(&state.db)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !is_set {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "no archive password set".to_string(),
+        ));
+    }
+    let unlocked = state
+        .archive_keys
+        .unlock(&state.db, &req.password)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "unlocked": unlocked })))
+}
+
+async fn archive_lock(State(state): State<AppState>) -> Json<serde_json::Value> {
+    state.archive_keys.lock();
+    Json(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Deserialize)]
+struct ArchiveListQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+async fn list_archive(
+    State(state): State<AppState>,
+    Query(q): Query<ArchiveListQuery>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    if !state.archive_keys.is_unlocked() {
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "locked": true })),
+        )
+            .into_response());
+    }
+
+    let network = state
+        .config
+        .lock()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .network
+        .network_type
+        .data_dir_name()
+        .to_string();
+
+    let limit = q.limit.unwrap_or(50);
+    let offset = q.offset.unwrap_or(0);
+
+    let items = state
+        .db
+        .list_archive(&network, limit, offset)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(items).into_response())
+}
+
+async fn get_archive_item(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let Some(key) = state.archive_keys.key() else {
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "locked": true })),
+        )
+            .into_response());
+    };
+
+    let blob = state
+        .db
+        .get_archive_blob(&id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let Some(blob) = blob else {
+        return Err((StatusCode::NOT_FOUND, "archive item not found".to_string()));
+    };
+
+    let plaintext = crate::crypto::open(&key, &blob, id.as_bytes())
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to decrypt archive item".to_string()))?;
+    let value: serde_json::Value = serde_json::from_slice(&plaintext)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "failed to parse archive item".to_string()))?;
+
+    Ok(Json(value).into_response())
+}
+
 async fn restart_daemon() -> impl IntoResponse {
     let handle = tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -820,6 +950,108 @@ async fn restart_daemon() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::pool::manager::PoolManager;
+
+    fn test_state() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(Database::open(&dir.path().join("test.db")).expect("db open"));
+        let config = Arc::new(std::sync::Mutex::new(Config::default_config()));
+        let pool_manager = Arc::new(PoolManager::new(db.clone(), None, None, config.clone()));
+        let archive_keys = Arc::new(ArchiveKeyStore::new());
+        (
+            AppState {
+                pool_manager,
+                db,
+                config,
+                archive_keys,
+            },
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn list_archive_returns_locked_when_no_key_cached() {
+        let (state, _dir) = test_state();
+        let resp = list_archive(State(state), Query(ArchiveListQuery { limit: None, offset: None }))
+            .await
+            .expect("handler ok")
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_archive_item_returns_locked_when_no_key_cached() {
+        let (state, _dir) = test_state();
+        let resp = get_archive_item(State(state), axum::extract::Path("some-id".to_string()))
+            .await
+            .expect("handler ok")
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn archive_unlock_without_password_set_returns_bad_request() {
+        let (state, _dir) = test_state();
+        let err = archive_unlock(
+            State(state),
+            Json(ArchivePasswordRequest {
+                password: "whatever".to_string(),
+            }),
+        )
+        .await
+        .expect_err("should reject when no password configured");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn set_password_then_unlock_then_lock_flow() {
+        let (state, _dir) = test_state();
+        let ok = archive_set_password(
+            State(state.clone()),
+            Json(ArchivePasswordRequest {
+                password: "hunter2".to_string(),
+            }),
+        )
+        .await
+        .expect("set-password ok");
+        assert_eq!(ok.0["ok"], serde_json::json!(true));
+
+        // Setting again should now be rejected (v1: only-set-if-not-exists).
+        let err = archive_set_password(
+            State(state.clone()),
+            Json(ArchivePasswordRequest {
+                password: "other".to_string(),
+            }),
+        )
+        .await
+        .expect_err("second set-password should be rejected");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+
+        let wrong = archive_unlock(
+            State(state.clone()),
+            Json(ArchivePasswordRequest {
+                password: "wrong".to_string(),
+            }),
+        )
+        .await
+        .expect("unlock handler ok even on wrong password");
+        assert_eq!(wrong.0["unlocked"], serde_json::json!(false));
+
+        let right = archive_unlock(
+            State(state.clone()),
+            Json(ArchivePasswordRequest {
+                password: "hunter2".to_string(),
+            }),
+        )
+        .await
+        .expect("unlock handler ok");
+        assert_eq!(right.0["unlocked"], serde_json::json!(true));
+        assert!(state.archive_keys.is_unlocked());
+
+        let _ = archive_lock(State(state.clone())).await;
+        assert!(!state.archive_keys.is_unlocked());
+    }
 
     #[test]
     fn virtual_height_must_be_future() {
