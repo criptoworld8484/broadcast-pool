@@ -55,6 +55,11 @@ pub struct PoolManager {
     price_feed: PriceFeed,
     /// Broadcast channel for scripthash state changes (virtual mempool add/remove).
     scripthash_notifications: tokio::sync::broadcast::Sender<ScripthashNotification>,
+    /// Global broadcast halt. Set when a row_mac mismatch (tampered row) is detected; cleared only
+    /// by an explicit admin acknowledgement via `/api/security/acknowledge`.
+    safe_mode: Arc<AtomicBool>,
+    /// Ids of tampered rows detected while safe mode is active, for the dashboard banner.
+    tampered_ids: Arc<Mutex<Vec<String>>>,
 }
 
 /// A tx the user schedules by hand from the dashboard: retained wallet txs under manual mode and
@@ -83,7 +88,34 @@ impl PoolManager {
             health_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             price_feed: PriceFeed::new(),
             scripthash_notifications,
+            safe_mode: Arc::new(AtomicBool::new(false)),
+            tampered_ids: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    pub fn is_safe_mode(&self) -> bool {
+        self.safe_mode.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn enter_safe_mode(&self, id: &str) {
+        self.safe_mode.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut v) = self.tampered_ids.lock() {
+            if !v.iter().any(|x| x == id) {
+                v.push(id.to_string());
+            }
+        }
+        tracing::error!("SAFE MODE: tampered row {} detected — broadcasting halted", id);
+    }
+
+    pub fn clear_safe_mode(&self) {
+        self.safe_mode.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut v) = self.tampered_ids.lock() {
+            v.clear();
+        }
+    }
+
+    pub fn tampered_ids(&self) -> Vec<String> {
+        self.tampered_ids.lock().map(|v| v.clone()).unwrap_or_default()
     }
 
     /// Subscribe to scripthash state change notifications.
@@ -425,6 +457,10 @@ impl PoolManager {
     }
 
     pub fn broadcast_due_transactions(&self) -> Result<Vec<(String, Result<String>)>> {
+        if self.is_safe_mode() {
+            tracing::warn!("SAFE MODE active — skipping broadcast_due_transactions (global halt)");
+            return Ok(Vec::new());
+        }
         let network = {
             let config = self.config.lock().map_err(|e| anyhow::anyhow!("Config lock failed: {}", e))?;
             config.network.network_type.data_dir_name().to_string()
@@ -438,6 +474,10 @@ impl PoolManager {
         let mut results = Vec::new();
 
         for tx in due_txs {
+            if tx.tampered == Some(true) {
+                self.enter_safe_mode(&tx.id);
+                continue;
+            }
             if !self.is_locktime_satisfied(tx.nlocktime)? {
                 if tx.nlocktime.is_some_and(|n| n > 500_000_000) {
                     if tx.broadcast_missed_at.is_none() {
@@ -588,6 +628,10 @@ impl PoolManager {
             serde_json::json!({}),
         );
         // #endregion
+        if self.is_safe_mode() {
+            tracing::warn!("SAFE MODE active — skipping scheduler tick (global halt, awaiting admin acknowledge)");
+            return Ok(Vec::new());
+        }
         // The scheduler needs a height and an MTP, not the address index — so Bitcoin Core alone
         // is enough to keep honouring schedules while electrs/Fulcrum is down.
         if !self.chain_clock_available() {
@@ -600,6 +644,10 @@ impl PoolManager {
         };
 
         for tx in self.get_pending_by_scheduled_time(&network)? {
+            if tx.tampered == Some(true) {
+                self.enter_safe_mode(&tx.id);
+                continue;
+            }
             if !(is_user_scheduled_mode(tx.broadcast_mode.as_deref())
                 || tx.broadcast_mode.as_deref() == Some("scheduled"))
             {
@@ -1451,6 +1499,20 @@ mod tests {
         let db = Arc::new(Database::open(&dir.path().join("test.db")).expect("db open"));
         let config = Arc::new(Mutex::new(Config::default_config()));
         (PoolManager::new(db, None, None, config), dir)
+    }
+
+    // Detecting a tampered row (HMAC mismatch) must flip a global halt: no broadcasting until an
+    // admin acknowledges, and the tampered tx id must be reported for the dashboard banner.
+    #[test]
+    fn safe_mode_toggles_and_reports_ids() {
+        let (pm, _dir) = test_manager();
+        assert!(!pm.is_safe_mode());
+        pm.enter_safe_mode("abc");
+        assert!(pm.is_safe_mode());
+        assert_eq!(pm.tampered_ids(), vec!["abc".to_string()]);
+        pm.clear_safe_mode();
+        assert!(!pm.is_safe_mode());
+        assert!(pm.tampered_ids().is_empty());
     }
 
     // With neither an indexer nor Bitcoin Core, there is no chain clock: the tick must refuse to

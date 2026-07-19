@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/transactions/{id}/remove", post(remove_transaction))
         .route("/api/transactions/{id}/retry", post(retry_transaction))
         .route("/api/status", get(get_status))
+        .route("/api/security/acknowledge", post(security_acknowledge))
         .route("/api/config", get(get_config))
         .route("/api/config", post(save_config))
         .route("/api/restart", post(restart_daemon))
@@ -439,6 +440,16 @@ struct StatusResponse {
     liana_vb_enabled: bool,
     liana_vb_target_height: u64,
     liana_vb_disarm_height: u64,
+    /// True when a tampered row (row_mac mismatch) halted broadcasting globally; cleared only by
+    /// an admin acknowledging via `/api/security/acknowledge`.
+    safe_mode: bool,
+    /// Ids of the tampered rows that triggered safe mode, for the dashboard banner.
+    tampered_ids: Vec<String>,
+}
+
+async fn security_acknowledge(State(state): State<AppState>) -> Json<serde_json::Value> {
+    state.pool_manager.clear_safe_mode();
+    Json(serde_json::json!({ "ok": true }))
 }
 
 #[derive(serde::Serialize, Deserialize)]
@@ -716,6 +727,8 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         liana_vb_enabled,
         liana_vb_target_height,
         liana_vb_disarm_height,
+        safe_mode: state.pool_manager.is_safe_mode(),
+        tampered_ids: state.pool_manager.tampered_ids(),
     }))
 }
 

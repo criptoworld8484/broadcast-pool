@@ -30,6 +30,18 @@ impl Scheduler {
 
         loop {
             let start = Instant::now();
+
+            if self.pool_manager.is_safe_mode() {
+                tracing::warn!(
+                    "SAFE MODE active — broadcast loop paused (tampered row detected, awaiting admin acknowledge via /api/security/acknowledge)"
+                );
+                let elapsed = start.elapsed();
+                if elapsed < BROADCAST_CHECK_INTERVAL {
+                    sleep(BROADCAST_CHECK_INTERVAL - elapsed).await;
+                }
+                continue;
+            }
+
             let pool_manager = self.pool_manager.clone();
 
             let tick = tokio::task::spawn_blocking(move || pool_manager.run_scheduler_tick()).await;
