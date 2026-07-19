@@ -2396,7 +2396,7 @@ fn handle_broadcast(
                 cfg.schedule.liana_virtual_block.target_height = target.saturating_add(2);
                 let snapshot = cfg.clone();
                 drop(cfg);
-                if let Err(e) = crate::discovery::save_config_to_disk(&snapshot) {
+                if let Err(e) = crate::discovery::save_config_to_disk(&snapshot, pool_manager.db_key()) {
                     tracing::warn!("Failed to persist advanced virtual-block height: {}", e);
                 }
                 Some(target)

@@ -491,7 +491,7 @@ async fn get_config(State(state): State<AppState>) -> Result<Json<ConfigResponse
     if crate::discovery::is_umbrel_mode() {
         if crate::discovery::sanitize_umbrel_indexer_config(&mut config) {
             reconnect = true;
-            let _ = crate::discovery::save_config_to_disk(&config);
+            let _ = crate::discovery::save_config_to_disk(&config, state.db.key());
         }
     }
     let response = config_to_response(&config, false);
@@ -612,7 +612,7 @@ async fn save_config(
 
     tracing::info!("Config modified");
 
-    crate::discovery::save_config_to_disk(&config)
+    crate::discovery::save_config_to_disk(&config, state.db.key())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("File write error: {}", e)))?;
 
     let response = config_to_response(&config, network_changed);
@@ -640,7 +640,7 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
     let mut reconnect = false;
     if let Ok(mut cfg) = state.config.lock() {
         if crate::discovery::sanitize_umbrel_indexer_config(&mut cfg) {
-            let _ = crate::discovery::save_config_to_disk(&cfg);
+            let _ = crate::discovery::save_config_to_disk(&cfg, state.db.key());
             reconnect = true;
         }
     }

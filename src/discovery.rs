@@ -1154,13 +1154,20 @@ pub fn apply_lan_ip(config: &mut Config) {
     }
 }
 
-pub fn save_config_to_disk(config: &Config) -> anyhow::Result<()> {
+/// Persist `config` to disk. `bitcoin_rpc.password` is encrypted at rest with the keyfile
+/// `key` before serializing — the in-memory `config` (which callers keep using afterwards,
+/// with the plaintext password) is never mutated; only a clone is written out.
+pub fn save_config_to_disk(config: &Config, key: &[u8; 32]) -> anyhow::Result<()> {
     let config_path = Config::resolved_config_path();
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let toml_str = toml::to_string_pretty(config)?;
+    let mut to_write = config.clone();
+    if let Some(ref mut rpc) = to_write.bitcoin_rpc {
+        rpc.password = crate::config::encrypt_rpc_password(key, &rpc.password);
+    }
+    let toml_str = toml::to_string_pretty(&to_write)?;
     std::fs::write(&config_path, toml_str)?;
     tracing::info!("Config saved to {:?}", config_path);
     Ok(())

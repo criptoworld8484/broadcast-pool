@@ -339,6 +339,39 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Decrypt `bitcoin_rpc.password` (if it was persisted encrypted) BEFORE the RPC client is
+    // built below — the client is constructed here, ahead of the network-specific data dir /
+    // DB open (see comment below), and is reused for the rest of the process, so this must
+    // happen first or every RPC call would authenticate with the ciphertext. The DB isn't open
+    // yet at this point (it needs the network-resolved data dir), so the keyfile is loaded
+    // directly from the (network-specific, but not-yet-corrected) data dir implied by the
+    // current config. This matches the DB's own keyfile in the common case (network already
+    // correct, or BROADCAST_POOL_DATA_DIR pins one fixed directory regardless of network); if
+    // network auto-detection later moves the data dir, `Database::open` loads/creates a
+    // different keyfile and any *newly* encrypted password saved after that point uses the
+    // correct key — this only affects the rare case of decrypting an already-encrypted
+    // password immediately after a network change.
+    let rpc_pass_needs_decrypt = std::env::var("BROADCAST_POOL_RPC_PASS").is_err()
+        && config
+            .bitcoin_rpc
+            .as_ref()
+            .is_some_and(|rpc| !rpc.password.is_empty());
+    if rpc_pass_needs_decrypt {
+        let provisional_data_dir = get_data_dir(&config)?;
+        std::fs::create_dir_all(&provisional_data_dir)?;
+        let key_path = provisional_data_dir.join("pool.key");
+        match db::keyfile::load_or_create(&key_path) {
+            Ok(key) => {
+                if let Some(rpc) = config.bitcoin_rpc.as_mut() {
+                    rpc.password = config::decrypt_rpc_password(&key, &rpc.password);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not load keyfile to decrypt RPC password: {}", e);
+            }
+        }
+    }
+
     // RPC is only created when needed (lazy init). Built BEFORE deriving the data dir / DB
     // so network auto-detection can correct config.network first: both the data dir and the
     // DB filename are network-specific, so detecting the network AFTER opening the DB would
@@ -404,7 +437,7 @@ async fn main() -> Result<()> {
     discovery::apply_lan_ip(&mut config);
     let config_changed = indexer_before != config.indexer;
     if indexer_found || (discovery::is_umbrel_mode() && config_changed) {
-        if let Err(e) = discovery::save_config_to_disk(&config) {
+        if let Err(e) = discovery::save_config_to_disk(&config, db.key()) {
             tracing::warn!("Could not persist indexer config: {}", e);
         }
     }
@@ -539,7 +572,7 @@ async fn main() -> Result<()> {
                                 if c.indexer.is_none() {
                                     return false;
                                 }
-                                let _ = discovery::save_config_to_disk(&c);
+                                let _ = discovery::save_config_to_disk(&c, pm.db_key());
                                 drop(c);
                                 match pm.reconnect_indexer_from_config() {
                                     Ok(()) => {

@@ -254,6 +254,22 @@ impl Config {
     }
 }
 
+/// Encrypt `bitcoin_rpc.password` for persistence to disk. Idempotent: an empty password or
+/// one already in `enc:v1:` form passes through unchanged.
+pub fn encrypt_rpc_password(key: &[u8; 32], pw: &str) -> String {
+    if pw.is_empty() || crate::crypto::is_encoded(pw) {
+        return pw.to_string();
+    }
+    crate::crypto::encode_field(key, pw, b"bitcoin_rpc.password")
+}
+
+/// Decrypt `bitcoin_rpc.password` loaded from disk. Legacy plaintext (or a value that fails
+/// to decrypt, e.g. under a different key) is returned as-is.
+pub fn decrypt_rpc_password(key: &[u8; 32], stored: &str) -> String {
+    crate::crypto::decode_field(key, stored, b"bitcoin_rpc.password")
+        .unwrap_or_else(|_| stored.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     #[serde(rename = "type")]
@@ -444,6 +460,16 @@ impl Default for WebConfig {
 #[cfg(test)]
 mod tests {
     use super::NetworkType;
+
+    #[test]
+    fn rpc_password_encrypt_decrypt_roundtrip_and_legacy() {
+        let key = crate::crypto::generate_key();
+        let enc = crate::config::encrypt_rpc_password(&key, "s3cret");
+        assert!(enc.starts_with("enc:v1:"));
+        assert_eq!(crate::config::decrypt_rpc_password(&key, &enc), "s3cret");
+        // Legacy plaintext passes through.
+        assert_eq!(crate::config::decrypt_rpc_password(&key, "plain"), "plain");
+    }
 
     // The signet/testnet4 constants were previously wrong (signet had 65 chars; testnet4
     // held testnet3's hash), which broke Liana's genesis check. Guard all networks.

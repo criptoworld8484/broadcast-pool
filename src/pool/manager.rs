@@ -93,6 +93,12 @@ impl PoolManager {
         }
     }
 
+    /// Keyfile encryption key, for call sites that only hold a `PoolManager` and need to
+    /// encrypt/decrypt config fields (e.g. `bitcoin_rpc.password`) before persisting.
+    pub(crate) fn db_key(&self) -> &[u8; 32] {
+        self.db.key()
+    }
+
     pub fn is_safe_mode(&self) -> bool {
         self.safe_mode.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -1202,7 +1208,7 @@ impl PoolManager {
             cfg.schedule.liana_virtual_block.enabled = false;
             cfg.clone()
         };
-        if let Err(e) = crate::discovery::save_config_to_disk(&snapshot) {
+        if let Err(e) = crate::discovery::save_config_to_disk(&snapshot, self.db.key()) {
             tracing::warn!("Failed to persist virtual-block disarm: {}", e);
         }
     }
