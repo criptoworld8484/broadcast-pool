@@ -91,6 +91,10 @@ impl Database {
         if let Err(e) = db.backfill_output_values() {
             tracing::warn!("Output-value backfill warning (non-fatal): {}", e);
         }
+        // Encrypt any legacy plaintext rows and seal their row_mac (non-fatal).
+        if let Err(e) = db.encrypt_legacy_rows() {
+            tracing::warn!("Legacy encryption migration warning (non-fatal): {}", e);
+        }
         Ok(db)
     }
 
@@ -122,6 +126,64 @@ impl Database {
                     updated += 1;
                 }
             }
+        }
+        Ok(updated)
+    }
+
+    /// Encrypt sensitive columns (`tx_hex`/`destination_address`/`source_label`) for rows
+    /// persisted before field-level encryption existed, and seal their `row_mac`. Idempotent:
+    /// a row is only selected if `tx_hex` isn't already `enc:`-prefixed or `row_mac` is NULL;
+    /// each field is only encrypted if it isn't already encoded, so re-running never
+    /// double-encrypts. Non-fatal at the call site (see `open`). Returns the number of rows
+    /// touched.
+    pub fn encrypt_legacy_rows(&self) -> Result<usize> {
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = {
+            let conn = self.lock_conn()?;
+            let mut stmt = conn.prepare(
+                "SELECT id, tx_hex, destination_address, source_label FROM broadcast_pool \
+                 WHERE tx_hex NOT LIKE 'enc:%' OR row_mac IS NULL",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+
+        let mut updated = 0;
+        for (id, tx_hex, dest, source) in rows {
+            let enc_tx_hex = if crate::crypto::is_encoded(&tx_hex) {
+                tx_hex
+            } else {
+                crate::crypto::encode_field(&self.key, &tx_hex, id.as_bytes())
+            };
+            let enc_dest = dest.map(|d| {
+                if crate::crypto::is_encoded(&d) {
+                    d
+                } else {
+                    crate::crypto::encode_field(&self.key, &d, id.as_bytes())
+                }
+            });
+            let enc_source = source.map(|s| {
+                if crate::crypto::is_encoded(&s) {
+                    s
+                } else {
+                    crate::crypto::encode_field(&self.key, &s, id.as_bytes())
+                }
+            });
+
+            {
+                let conn = self.lock_conn()?;
+                conn.execute(
+                    "UPDATE broadcast_pool SET tx_hex = ?1, destination_address = ?2, source_label = ?3 WHERE id = ?4",
+                    params![enc_tx_hex, enc_dest, enc_source, id],
+                )
+                .context("Failed to encrypt legacy row")?;
+            }
+            self.reseal_row_mac(&id)?;
+            updated += 1;
         }
         Ok(updated)
     }
@@ -1262,6 +1324,55 @@ mod tests {
         db.run_data_migrations().unwrap();
         let tx = db.get_broadcast_tx_by_id(&id).unwrap();
         assert_eq!(tx.broadcast_mode.as_deref(), Some("imported"));
+    }
+
+    // Startup migration must encrypt legacy plaintext rows (tx_hex not enc:-prefixed, or
+    // row_mac NULL) and reseal row_mac so they read back correctly and are not flagged tampered.
+    #[test]
+    fn legacy_plaintext_rows_get_encrypted_and_macked() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("l.db")).unwrap();
+        // Insert a row, then force its columns back to plaintext + null mac (simulate legacy).
+        let stored = db.insert_broadcast_tx(&crate::db::models::NewBroadcastTx{
+            tx_hex: tx_hex_with_output_sats(&[10_000]), network:"testnet4".into(), nlocktime:None,
+            broadcast_mode:Some("scheduled".into()), scheduled_time:Some(chrono::Utc::now()),
+            target_fee_rate:None, source_label:Some("L".into()), destination_address:Some("addrX".into()),
+            utxo_count:Some(1), total_value_btc:None, replacement_of:None }).unwrap();
+        db.lock_conn().unwrap().execute(
+            "UPDATE broadcast_pool SET destination_address='addrX', row_mac=NULL WHERE id=?1",
+            params![stored.id]).unwrap();
+
+        let n = db.encrypt_legacy_rows().unwrap();
+        assert_eq!(n, 1);
+        // Now stored encrypted, read decrypts, and mac verifies (not tampered).
+        let raw: String = db.lock_conn().unwrap().query_row(
+            "SELECT destination_address FROM broadcast_pool WHERE id=?1", params![stored.id],
+            |r| r.get(0)).unwrap();
+        assert!(raw.starts_with("enc:v1:"));
+        let got = db.get_broadcast_tx_by_id(&stored.id).unwrap();
+        assert_eq!(got.destination_address.as_deref(), Some("addrX"));
+        assert_ne!(got.tampered, Some(true));
+    }
+
+    // Running the legacy-encryption migration twice must be a no-op the second time.
+    #[test]
+    fn legacy_encryption_migration_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("l2.db")).unwrap();
+        let stored = db.insert_broadcast_tx(&crate::db::models::NewBroadcastTx{
+            tx_hex: tx_hex_with_output_sats(&[10_000]), network:"testnet4".into(), nlocktime:None,
+            broadcast_mode:Some("scheduled".into()), scheduled_time:Some(chrono::Utc::now()),
+            target_fee_rate:None, source_label:Some("L".into()), destination_address:Some("addrX".into()),
+            utxo_count:Some(1), total_value_btc:None, replacement_of:None }).unwrap();
+        db.lock_conn().unwrap().execute(
+            "UPDATE broadcast_pool SET destination_address='addrX', row_mac=NULL WHERE id=?1",
+            params![stored.id]).unwrap();
+
+        assert_eq!(db.encrypt_legacy_rows().unwrap(), 1);
+        assert_eq!(db.encrypt_legacy_rows().unwrap(), 0);
+        let got = db.get_broadcast_tx_by_id(&stored.id).unwrap();
+        assert_eq!(got.destination_address.as_deref(), Some("addrX"));
+        assert_ne!(got.tampered, Some(true));
     }
 }
 
