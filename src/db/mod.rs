@@ -303,12 +303,17 @@ impl Database {
     pub fn get_tx_hex_by_txid(&self, txid: &str) -> Result<Option<String>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn
-            .prepare("SELECT tx_hex FROM broadcast_pool WHERE txid = ?1 AND status IN ('pending', 'scheduled') LIMIT 1")
+            .prepare("SELECT id, tx_hex FROM broadcast_pool WHERE txid = ?1 AND status IN ('pending', 'scheduled') LIMIT 1")
             .context("Failed to prepare get_tx_hex query")?;
-        let mut rows = stmt.query_map(params![txid], |row| row.get::<_, String>(0))
+        let mut rows = stmt
+            .query_map(params![txid], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
             .context("Failed to query tx_hex by txid")?;
         match rows.next() {
-            Some(Ok(hex)) => Ok(Some(hex)),
+            Some(Ok((id, tx_hex))) => {
+                let decoded = crate::crypto::decode_field(self.key(), &tx_hex, id.as_bytes())
+                    .context("Failed to decrypt tx_hex")?;
+                Ok(Some(decoded))
+            }
             _ => Ok(None),
         }
     }
@@ -925,6 +930,30 @@ mod tests {
         };
         let stored = db.insert_broadcast_tx(&new_tx).unwrap();
         assert_eq!(stored.total_value_btc, 1.5);
+    }
+
+    // get_tx_hex_by_txid serves the raw hex over the wallet-facing electrum transaction.get
+    // path; it must decrypt the stored ciphertext, not hand back "enc:v1:..." verbatim.
+    #[test]
+    fn get_tx_hex_by_txid_returns_decrypted_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("t.db")).unwrap();
+        let hex = tx_hex_with_output_sats(&[10_000]);
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: hex.clone(), network: "testnet4".into(), nlocktime: None,
+            broadcast_mode: Some("imported".into()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let stored = db.insert_broadcast_tx(&new_tx).unwrap();
+        let txid = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        db.lock_conn().unwrap()
+            .execute("UPDATE broadcast_pool SET txid = ?1 WHERE id = ?2", params![txid, stored.id])
+            .unwrap();
+
+        let got = db.get_tx_hex_by_txid(txid).unwrap();
+        assert_eq!(got, Some(hex), "must return decrypted plaintext hex");
+        assert!(!got.unwrap().starts_with("enc:"), "must not leak ciphertext prefix");
     }
 
     // Rows persisted before value-derivation existed have total_value_btc = 0. The backfill
