@@ -11,7 +11,39 @@ use uuid::Uuid;
 
 use self::models::*;
 
-const BROADCAST_SELECT: &str = "id, tx_hex, txid, status, network, nlocktime, broadcast_mode, scheduled_time, broadcast_at, confirmed_at, block_height, target_fee_rate, actual_fee_rate, source_label, destination_address, utxo_count, total_value_btc, replacement_of, error_message, retry_count, broadcast_missed_at, original_scheduled_time, defer_until, schedule_trigger, target_price, price_currency, price_condition, created_at, updated_at";
+const BROADCAST_SELECT: &str = "id, tx_hex, txid, status, network, nlocktime, broadcast_mode, scheduled_time, broadcast_at, confirmed_at, block_height, target_fee_rate, actual_fee_rate, source_label, destination_address, utxo_count, total_value_btc, replacement_of, error_message, retry_count, broadcast_missed_at, original_scheduled_time, defer_until, schedule_trigger, target_price, price_currency, price_condition, created_at, updated_at, row_mac";
+
+/// Canonical byte string used both when computing `row_mac` at insert time and when
+/// re-verifying it at read time. Fields are joined with `\x1f` (a byte that cannot appear in
+/// any of them); NULL-valued fields must be normalized to the empty string identically at
+/// both call sites, or verification will always fail.
+fn row_mac_input(
+    id: &str,
+    status: &str,
+    mode: &str,
+    scheduled: &str,
+    nlocktime: i64,
+    target_price: &str,
+    schedule_trigger: &str,
+    price_condition: &str,
+    enc_tx_hex: &str,
+    enc_dest: &str,
+) -> Vec<u8> {
+    [
+        id,
+        status,
+        mode,
+        scheduled,
+        &nlocktime.to_string(),
+        target_price,
+        schedule_trigger,
+        price_condition,
+        enc_tx_hex,
+        enc_dest,
+    ]
+    .join("\x1f")
+    .into_bytes()
+}
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -160,6 +192,11 @@ impl Database {
             tracing::warn!("Migration 007 warning (non-fatal): {}", e);
         }
 
+        // Migration 008: per-row integrity MAC column.
+        if let Err(e) = conn.execute_batch(schema::MIGRATION_008) {
+            tracing::warn!("Migration 008 warning (non-fatal): {}", e);
+        }
+
         Ok(())
     }
 
@@ -195,11 +232,31 @@ impl Database {
         let enc_source = tx.source_label.as_ref()
             .map(|s| crate::crypto::encode_field(&self.key, s, id.as_bytes()));
 
+        // Integrity MAC over the scheduling fields plus the encrypted sensitive fields, exactly
+        // as they will land in the columns. schedule_trigger/target_price/price_condition are
+        // not part of this INSERT (they take their schema defaults: 'datetime' / NULL / NULL),
+        // so the same defaults are used here — must match map_broadcast_row's read-back exactly.
+        let row_mac = hex::encode(crate::crypto::mac(
+            &self.key,
+            &row_mac_input(
+                &id,
+                status,
+                &broadcast_mode,
+                scheduled.as_deref().unwrap_or(""),
+                nlocktime as i64,
+                "",
+                "datetime",
+                "",
+                &enc_tx_hex,
+                enc_dest.as_deref().unwrap_or(""),
+            ),
+        ));
+
         {
             let conn = self.lock_conn()?;
             conn.execute(
-                "INSERT INTO broadcast_pool (id, tx_hex, status, network, nlocktime, broadcast_mode, scheduled_time, target_fee_rate, source_label, destination_address, utxo_count, total_value_btc, replacement_of, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO broadcast_pool (id, tx_hex, status, network, nlocktime, broadcast_mode, scheduled_time, target_fee_rate, source_label, destination_address, utxo_count, total_value_btc, replacement_of, row_mac, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     id,
                     enc_tx_hex,
@@ -214,6 +271,7 @@ impl Database {
                     tx.utxo_count.unwrap_or(1),
                     total_value_btc,
                     tx.replacement_of,
+                    row_mac,
                     now,
                     now,
                 ],
@@ -1003,6 +1061,29 @@ mod tests {
         assert_eq!((stats.total_value_btc * 1e8).round() as u64, 50_000, "value excludes failed");
     }
 
+    // The row_mac (HMAC over the scheduling fields + encrypted sensitive fields) must catch
+    // direct tampering of a column via SQL (bypassing the app layer entirely).
+    #[test]
+    fn tampering_schedule_is_detected_by_row_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("t.db")).unwrap();
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: tx_hex_with_output_sats(&[10_000]), network: "testnet4".into(),
+            nlocktime: None, broadcast_mode: Some("scheduled".into()),
+            scheduled_time: Some(chrono::Utc::now()), target_fee_rate: None,
+            source_label: None, destination_address: None, utxo_count: Some(1),
+            total_value_btc: None, replacement_of: None,
+        };
+        let stored = db.insert_broadcast_tx(&new_tx).unwrap();
+        // Untampered read: not flagged.
+        assert_ne!(db.get_broadcast_tx_by_id(&stored.id).unwrap().tampered, Some(true));
+        // Tamper the scheduled_time column directly.
+        db.lock_conn().unwrap().execute(
+            "UPDATE broadcast_pool SET scheduled_time='1999-01-01T00:00:00Z' WHERE id=?1",
+            params![stored.id]).unwrap();
+        assert_eq!(db.get_broadcast_tx_by_id(&stored.id).unwrap().tampered, Some(true));
+    }
+
     // Running the migration twice must be safe (idempotent) — re-running it on an already
     // reclassified row must not error and must leave the row as "imported".
     #[test]
@@ -1050,22 +1131,53 @@ fn map_broadcast_row(row: &rusqlite::Row, key: &[u8; 32]) -> rusqlite::Result<Br
             s
         })
     };
+
+    // Raw (still-encrypted) column values, needed both for decrypting below and for
+    // recomputing row_mac exactly as it was computed at insert time.
+    let raw_tx_hex: String = row.get(1)?;
+    let status_raw: String = row.get::<_, String>(3)?;
+    let nlocktime_raw: i64 = row.get(5)?;
+    let broadcast_mode_raw: Option<String> = row.get(6)?;
+    let scheduled_raw: Option<String> = row.get(7)?;
+    let raw_dest: Option<String> = row.get(14)?;
+    let schedule_trigger_raw: Option<String> = row.get(23)?;
+    let target_price_raw: Option<f64> = row.get(24)?;
+    let price_condition_raw: Option<String> = row.get(26)?;
+    let stored_row_mac: Option<String> = row.get(29)?;
+
+    let expected_mac = hex::encode(crate::crypto::mac(
+        key,
+        &row_mac_input(
+            &id,
+            &status_raw,
+            broadcast_mode_raw.as_deref().unwrap_or(""),
+            scheduled_raw.as_deref().unwrap_or(""),
+            nlocktime_raw,
+            &target_price_raw.map(|p| p.to_string()).unwrap_or_default(),
+            schedule_trigger_raw.as_deref().unwrap_or(""),
+            price_condition_raw.as_deref().unwrap_or(""),
+            &raw_tx_hex,
+            raw_dest.as_deref().unwrap_or(""),
+        ),
+    ));
+    let tampered = Some(stored_row_mac.as_deref() != Some(expected_mac.as_str()));
+
     Ok(BroadcastTx {
-        tx_hex: dec(row.get::<_, String>(1)?),
+        tx_hex: dec(raw_tx_hex),
         id: id.clone(),
         txid: row.get(2)?,
-        status: TxStatus::from_str(&row.get::<_, String>(3)?),
+        status: TxStatus::from_str(&status_raw),
         network: row.get(4)?,
         nlocktime: row.get(5)?,
-        broadcast_mode: row.get(6)?,
-        scheduled_time: parse_optional_datetime(row.get::<_, Option<String>>(7)?),
+        broadcast_mode: broadcast_mode_raw,
+        scheduled_time: parse_optional_datetime(scheduled_raw),
         broadcast_at: parse_optional_datetime(row.get::<_, Option<String>>(8)?),
         confirmed_at: parse_optional_datetime(row.get::<_, Option<String>>(9)?),
         block_height: row.get(10)?,
         target_fee_rate: row.get(11)?,
         actual_fee_rate: row.get(12)?,
         source_label: row.get::<_, Option<String>>(13)?.map(dec),
-        destination_address: row.get::<_, Option<String>>(14)?.map(dec),
+        destination_address: raw_dest.map(dec),
         utxo_count: row.get(15)?,
         total_value_btc: row.get(16)?,
         replacement_of: row.get(17)?,
@@ -1074,10 +1186,10 @@ fn map_broadcast_row(row: &rusqlite::Row, key: &[u8; 32]) -> rusqlite::Result<Br
         broadcast_missed_at: parse_optional_datetime(row.get::<_, Option<String>>(20)?),
         original_scheduled_time: parse_optional_datetime(row.get::<_, Option<String>>(21)?),
         defer_until: parse_optional_datetime(row.get::<_, Option<String>>(22)?),
-        schedule_trigger: row.get(23)?,
-        target_price: row.get(24)?,
+        schedule_trigger: schedule_trigger_raw,
+        target_price: target_price_raw,
         price_currency: row.get(25)?,
-        price_condition: row.get(26)?,
+        price_condition: price_condition_raw,
         created_at: parse_datetime(&row.get::<_, String>(27)?),
         updated_at: parse_datetime(&row.get::<_, String>(28)?),
         locktime_waiting: None,
@@ -1088,6 +1200,7 @@ fn map_broadcast_row(row: &rusqlite::Row, key: &[u8; 32]) -> rusqlite::Result<Br
         locktime_remaining_secs: None,
         locktime_satisfied: None,
         current_btc_price: None,
+        tampered,
     })
 }
 

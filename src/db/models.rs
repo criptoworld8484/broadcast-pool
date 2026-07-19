@@ -97,6 +97,11 @@ pub struct BroadcastTx {
     /// Latest BTC/fiat price from price feed (enriched at API layer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_btc_price: Option<f64>,
+    /// Set by `map_broadcast_row`: Some(true) if the row's stored `row_mac` HMAC does not
+    /// match the recomputed value (or is missing) — the row was tampered with outside the
+    /// app layer. Some(false) if verified OK. None only if verification wasn't attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tampered: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

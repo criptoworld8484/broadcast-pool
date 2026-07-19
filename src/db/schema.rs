@@ -102,3 +102,7 @@ pub const MIGRATION_007: &str = r#"
 UPDATE broadcast_pool SET broadcast_mode = 'imported'
 WHERE broadcast_mode = 'immediate' AND status = 'pending';
 "#;
+
+pub const MIGRATION_008: &str = r#"
+ALTER TABLE broadcast_pool ADD COLUMN row_mac TEXT;
+"#;
