@@ -515,7 +515,14 @@ async fn main() -> Result<()> {
                 }
             });
 
-            let scheduler = Scheduler::new(pool_manager.clone(), shared_config.clone());
+            let archive_keys = std::sync::Arc::new(api::ArchiveKeyStore::new());
+
+            let scheduler = Scheduler::new(
+                pool_manager.clone(),
+                shared_config.clone(),
+                db.clone(),
+                archive_keys.clone(),
+            );
 
             let electrum_server = electrum_server::ElectrumServer::new(
                 pool_manager.clone(),
@@ -526,7 +533,7 @@ async fn main() -> Result<()> {
                 pool_manager: pool_manager.clone(),
                 db,
                 config: shared_config.clone(),
-                archive_keys: std::sync::Arc::new(api::ArchiveKeyStore::new()),
+                archive_keys,
             };
             let app = api::router(app_state);
             let bind_addr = format!("{}:{}", config.web.host, config.web.port);

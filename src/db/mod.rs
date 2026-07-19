@@ -1138,6 +1138,49 @@ impl Database {
             .context("Failed to delete broadcast tx")?;
         Ok(())
     }
+
+    /// Moves terminal-status rows older than `cutoff_rfc3339` into the encrypted archive.
+    ///
+    /// Each row is sealed with a brand-new, opaque archive id (never the original pool id,
+    /// so archive rows can't be correlated back to pool history at a glance) used as AEAD aad.
+    /// The insert-into-archive + delete-from-pool pair for a given row runs inside a single
+    /// SQLite transaction so a crash can never drop a pool row without its archive blob having
+    /// been durably written first. `crypto::seal` runs before the write transaction opens, so
+    /// the connection mutex is never held across the (CPU-bound) sealing step.
+    pub fn archive_terminal_older_than(
+        &self,
+        key: &[u8; 32],
+        network: &str,
+        cutoff_rfc3339: &str,
+    ) -> Result<usize> {
+        let txs = self.select_terminal_older_than(network, cutoff_rfc3339)?;
+        let mut count = 0usize;
+
+        for tx in txs {
+            let json = serde_json::to_vec(&tx).context("Failed to serialize tx for archive")?;
+            let archive_id = Uuid::new_v4().to_string();
+            let blob = crate::crypto::seal(key, &json, archive_id.as_bytes());
+            let archived_at = Utc::now().to_rfc3339();
+
+            let mut conn = self.lock_conn()?;
+            let txn = conn
+                .transaction()
+                .context("Failed to start archive transaction")?;
+            txn.execute(
+                "INSERT INTO archive_pool (id, network, archived_at, blob) VALUES (?1, ?2, ?3, ?4)",
+                params![archive_id, network, archived_at, blob],
+            )
+            .context("Failed to insert archive row")?;
+            txn.execute("DELETE FROM broadcast_pool WHERE id = ?1", params![tx.id])
+                .context("Failed to delete broadcast tx")?;
+            txn.commit().context("Failed to commit archive transaction")?;
+            drop(conn);
+
+            count += 1;
+        }
+
+        Ok(count)
+    }
 }
 
 #[cfg(test)]
@@ -1506,6 +1549,47 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "id1");
         assert_eq!(db.get_archive_blob("id1").unwrap().unwrap(), b"blob-bytes");
+    }
+
+    #[test]
+    fn retention_archives_terminal_and_deletes_from_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("r.db")).unwrap();
+        let archive_key = crate::crypto::generate_key();
+        let stored = db
+            .insert_broadcast_tx(&crate::db::models::NewBroadcastTx {
+                tx_hex: tx_hex_with_output_sats(&[10_000]),
+                network: "testnet4".into(),
+                nlocktime: None,
+                broadcast_mode: Some("scheduled".into()),
+                scheduled_time: Some(chrono::Utc::now()),
+                target_fee_rate: None,
+                source_label: Some("testnet4-plaintext-marker".into()),
+                destination_address: Some("testnet4-plaintext-marker-addr".into()),
+                utxo_count: Some(1),
+                total_value_btc: None,
+                replacement_of: None,
+            })
+            .unwrap();
+        db.update_tx_status(&stored.id, TxStatus::Confirmed, None).unwrap();
+        db.lock_conn()
+            .unwrap()
+            .execute(
+                "UPDATE broadcast_pool SET updated_at='2000-01-01T00:00:00Z' WHERE id=?1",
+                params![stored.id],
+            )
+            .unwrap();
+
+        let moved = db
+            .archive_terminal_older_than(&archive_key, "testnet4", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(moved, 1);
+        assert!(db.get_broadcast_tx_by_id(&stored.id).is_err()); // gone from active pool
+        let list = db.list_archive("testnet4", 10, 0).unwrap();
+        assert_eq!(list.len(), 1);
+        // Blob does not contain plaintext.
+        let blob = db.get_archive_blob(&list[0].id).unwrap().unwrap();
+        assert!(!String::from_utf8_lossy(&blob).contains("testnet4-plaintext-marker"));
     }
 }
 

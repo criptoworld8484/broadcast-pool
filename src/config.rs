@@ -207,7 +207,7 @@ impl Config {
             pool: PoolConfig {
                 max_size_kb: 300,
                 rebroadcast_interval_minutes: 30,
-                expiry_days: 14,
+                expiry_days: 30,
             },
             schedule: ScheduleConfig {
                 broadcast_mode: BroadcastMode::Immediate,
