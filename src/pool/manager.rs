@@ -57,6 +57,12 @@ pub struct PoolManager {
     scripthash_notifications: tokio::sync::broadcast::Sender<ScripthashNotification>,
 }
 
+/// A tx the user schedules by hand from the dashboard: retained wallet txs under manual mode and
+/// dashboard-imported txs. Both offer date/time AND price triggers; they differ only in the label.
+pub fn is_user_scheduled_mode(mode: Option<&str>) -> bool {
+    matches!(mode, Some("manual") | Some("imported"))
+}
+
 impl PoolManager {
     pub fn new(
         db: Arc<Database>,
@@ -134,7 +140,7 @@ impl PoolManager {
             || tx.scheduled_time.is_some()
             || tx.schedule_trigger.as_deref() == Some("price")
             || tx.broadcast_mode.as_deref() == Some("scheduled")
-            || tx.broadcast_mode.as_deref() == Some("manual");
+            || is_user_scheduled_mode(tx.broadcast_mode.as_deref());
 
         let defer_until = if is_reschedule {
             Some(scheduled_str.as_str())
@@ -174,8 +180,8 @@ impl PoolManager {
         if !matches!(tx.status, TxStatus::Pending | TxStatus::Scheduled) {
             anyhow::bail!("Cannot set price trigger on transaction in status {}", tx.status.as_str());
         }
-        if tx.broadcast_mode.as_deref() != Some("manual") {
-            anyhow::bail!("Price trigger scheduling is only available for manual (pending) transactions");
+        if !is_user_scheduled_mode(tx.broadcast_mode.as_deref()) {
+            anyhow::bail!("Price trigger scheduling is only available for manual/imported (pending) transactions");
         }
         if tx.nlocktime.is_some_and(|n| n > 0) {
             anyhow::bail!("Price trigger scheduling is only available when nLockTime is disabled (0)");
@@ -255,35 +261,12 @@ impl PoolManager {
             }
         }
         if let Some(ref rpc) = self.rpc {
-            match rpc.broadcast_transaction(tx_hex) {
-                Ok(txid) => return Ok(txid),
-                Err(e) => {
-                    tracing::warn!("Core RPC broadcast failed: {}, trying secondary indexer...", e);
-                    indexer_err = indexer_err.or(Some(e));
-                }
-            }
-        }
-        // Last resort: a secondary indexer on the LAN.
-        let secondary_url = {
-            let cfg = self.config.lock().ok();
-            cfg.and_then(|c| c.secondary_indexer.clone())
-        };
-        if let Some(raw) = secondary_url {
-            let url = crate::discovery::normalize_indexer_url(&raw);
-            if let Ok(client) = ElectrumClient::new(&url) {
-                match client.broadcast_transaction(tx_hex) {
-                    Ok(txid) => {
-                        tracing::info!("Broadcast via secondary indexer {}", url);
-                        return Ok(txid);
-                    }
-                    Err(e) => tracing::warn!("Secondary indexer broadcast failed: {}", e),
-                }
-            }
+            return rpc.broadcast_transaction(tx_hex);
         }
         if let Some(e) = indexer_err {
             return Err(e);
         }
-        anyhow::bail!("No broadcast backend available (indexer, Core, nor secondary)")
+        anyhow::bail!("No broadcast backend available (neither Indexer nor RPC)")
     }
 
     pub fn import_transaction(&self, new_tx: &NewBroadcastTx) -> Result<BroadcastTx> {
@@ -617,10 +600,9 @@ impl PoolManager {
         };
 
         for tx in self.get_pending_by_scheduled_time(&network)? {
-            if !matches!(
-                tx.broadcast_mode.as_deref(),
-                Some("scheduled") | Some("manual")
-            ) {
+            if !(is_user_scheduled_mode(tx.broadcast_mode.as_deref())
+                || tx.broadcast_mode.as_deref() == Some("scheduled"))
+            {
                 continue;
             }
             if tx.schedule_trigger.as_deref() == Some("price") {
@@ -803,7 +785,7 @@ impl PoolManager {
 
     fn tx_has_broadcast_schedule(tx: &BroadcastTx) -> bool {
         tx.broadcast_mode.as_deref() == Some("scheduled")
-            || tx.broadcast_mode.as_deref() == Some("manual")
+            || is_user_scheduled_mode(tx.broadcast_mode.as_deref())
             || tx.scheduled_time.is_some()
             || tx.defer_until.is_some()
             || tx.broadcast_missed_at.is_some()
@@ -1033,12 +1015,8 @@ impl PoolManager {
     fn write_chain_health(&self, f: impl FnOnce(&mut ChainHealth)) {
         if let Ok(mut health) = self.chain_health.write() {
             f(&mut health);
-            health.source = decide_chain_source(
-                health.indexer_up,
-                health.core_up,
-                health.core_ibd,
-                health.secondary_up,
-            );
+            health.source =
+                decide_chain_source(health.indexer_up, health.core_up, health.core_ibd);
         }
     }
 
@@ -1102,60 +1080,6 @@ impl PoolManager {
             None => (false, false, None, None, None),
         };
 
-        // Third fallback: probe the secondary indexer only when the primary is down and Core is
-        // unusable. Reads the URL + our network from config; a fresh ElectrumClient per probe
-        // (rare path).
-        let (secondary_url, secondary_network) = {
-            match self.config.lock().ok() {
-                Some(c) => (c.secondary_indexer.clone(), Some(c.network.network_type.clone())),
-                None => (None, None),
-            }
-        };
-        let secondary_configured = secondary_url.is_some();
-        let indexer_is_up = indexer_height.is_some();
-        let (secondary_up, secondary_height, secondary_mtp) = if should_probe_secondary(
-            indexer_is_up,
-            core_up,
-            core_ibd,
-            secondary_configured,
-        ) {
-            let url = crate::discovery::normalize_indexer_url(secondary_url.as_deref().unwrap_or(""));
-            match ElectrumClient::new(&url) {
-                Ok(client) => match client.get_block_height() {
-                    Ok(h) => {
-                        // Reject a wrong-network secondary before trusting its height: a mainnet
-                        // indexer answers ~900k blocks, which would mark testnet height-locked txs
-                        // due early. Only accept it if its genesis matches our configured network.
-                        let net_ok = secondary_network
-                            .as_ref()
-                            .map(|n| client.genesis_matches_network(n).unwrap_or(false))
-                            .unwrap_or(false);
-                        if net_ok {
-                            let mtp = client.get_median_time_past().ok();
-                            tracing::info!("Secondary indexer alive at {} (height {})", url, h);
-                            (true, Some(h), mtp)
-                        } else {
-                            tracing::warn!(
-                                "Secondary indexer {} is on a different network (genesis mismatch) — ignoring",
-                                url
-                            );
-                            (false, None, None)
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("Secondary indexer probe failed: {}", e);
-                        (false, None, None)
-                    }
-                },
-                Err(e) => {
-                    tracing::debug!("Secondary indexer client build failed: {}", e);
-                    (false, None, None)
-                }
-            }
-        } else {
-            (false, None, None)
-        };
-
         self.write_chain_health(|h| {
             h.indexer_up = indexer_height.is_some();
             // Keep the last known name while it is down: the degraded banner names the server the
@@ -1167,11 +1091,9 @@ impl PoolManager {
             h.core_up = core_up;
             h.core_ibd = core_ibd;
             h.core_sync_pct = core_sync_pct;
-            h.secondary_configured = secondary_configured;
-            h.secondary_up = secondary_up;
-            // Prefer the indexer's height, then Core, then the secondary.
-            h.height = indexer_height.or(core_height).or(secondary_height);
-            h.mtp = core_mtp.or(secondary_mtp).or(h.mtp);
+            // Prefer the indexer's height when it is alive; it is what the wallet sees too.
+            h.height = indexer_height.or(core_height);
+            h.mtp = core_mtp.or(h.mtp);
             h.polled = true;
         });
 
@@ -1180,13 +1102,6 @@ impl PoolManager {
         if let Some(mtp) = core_mtp {
             if let Ok(mut cache) = self.mtp_cache.lock() {
                 *cache = Some((Instant::now(), mtp));
-            }
-        }
-        if core_mtp.is_none() {
-            if let Some(mtp) = secondary_mtp {
-                if let Ok(mut cache) = self.mtp_cache.lock() {
-                    *cache = Some((Instant::now(), mtp));
-                }
             }
         }
 
@@ -1511,18 +1426,6 @@ fn should_disarm(enabled: bool, armed_at_height: u64, real_height: u64) -> bool 
     enabled && real_height >= armed_at_height + 10
 }
 
-/// The secondary indexer is a last resort: probe it only when the primary is down AND Core cannot
-/// serve the clock (down or in IBD), and only if one is configured. Keeps the external LAN node
-/// untouched while the primary is healthy.
-fn should_probe_secondary(
-    indexer_up: bool,
-    core_up: bool,
-    core_ibd: bool,
-    secondary_configured: bool,
-) -> bool {
-    secondary_configured && !indexer_up && !(core_up && !core_ibd)
-}
-
 fn classify_mempool_congestion(fee_sat_vb: f64, network: &str) -> &'static str {
     let (low_max, high_min) = match network {
         "mainnet" => (10.0, 50.0),
@@ -1622,17 +1525,76 @@ mod tests {
         assert!(should_disarm(true, 100, 130)); // well past → disarm
     }
 
+    fn insert_imported(pm: &PoolManager, nlocktime: Option<u64>) -> String {
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: "00".to_string(),
+            network: "testnet4".to_string(),
+            nlocktime,
+            broadcast_mode: Some("imported".to_string()),
+            scheduled_time: None,
+            target_fee_rate: None,
+            source_label: None,
+            destination_address: None,
+            utxo_count: Some(1),
+            total_value_btc: None,
+            replacement_of: None,
+        };
+        pm.get_db().insert_broadcast_tx(&new_tx).expect("insert").id
+    }
+
     #[test]
-    fn secondary_probed_only_when_primary_down_and_core_unusable() {
-        // Primary up → never probe the external node.
-        assert!(!should_probe_secondary(true, false, false, true));
-        // Primary down but Core synced → Core covers it; don't probe secondary.
-        assert!(!should_probe_secondary(false, true, false, true));
-        // Primary down, Core down → probe secondary (if configured).
-        assert!(should_probe_secondary(false, false, false, true));
-        // Primary down, Core in IBD → probe secondary.
-        assert!(should_probe_secondary(false, true, true, true));
-        // Not configured → never probe.
-        assert!(!should_probe_secondary(false, false, false, false));
+    fn imported_tx_can_be_price_scheduled() {
+        let (pm, _dir) = test_manager();
+        let id = insert_imported(&pm, None);
+        // Imported must be accepted by the price-trigger scheduler, exactly like manual.
+        pm.schedule_by_price(&id, 100_000.0, "usd", "above", 5.0)
+            .expect("imported tx should accept a price trigger");
+        let tx = pm.get_db().get_broadcast_tx_by_id(&id).expect("reload");
+        assert_eq!(tx.schedule_trigger.as_deref(), Some("price"));
+    }
+
+    // The scheduler's "pending due" query must surface imported txs exactly like manual/scheduled
+    // ones. get_pending_by_scheduled_time's SQL already lists 'imported' in its IN(...) clause;
+    // this test guards that SQL+filter contract end-to-end so run_scheduler_tick's in-loop guard
+    // (which independently re-checks broadcast_mode) can't silently drop imported rows again.
+    #[test]
+    fn get_pending_by_scheduled_time_includes_imported() {
+        let (pm, _dir) = test_manager();
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: "00".to_string(),
+            network: "testnet4".to_string(),
+            nlocktime: None,
+            broadcast_mode: Some("imported".to_string()),
+            scheduled_time: Some(past),
+            target_fee_rate: None,
+            source_label: None,
+            destination_address: None,
+            utxo_count: Some(1),
+            total_value_btc: None,
+            replacement_of: None,
+        };
+        let id = pm.get_db().insert_broadcast_tx(&new_tx).expect("insert").id;
+
+        let pending = pm
+            .get_pending_by_scheduled_time("testnet4")
+            .expect("query pending by scheduled time");
+        assert!(
+            pending.iter().any(|tx| tx.id == id),
+            "imported tx with a past scheduled_time must be returned as pending-due"
+        );
+    }
+
+    #[test]
+    fn immediate_tx_still_rejects_price_schedule() {
+        let (pm, _dir) = test_manager();
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: "00".to_string(), network: "testnet4".to_string(), nlocktime: None,
+            broadcast_mode: Some("immediate".to_string()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let id = pm.get_db().insert_broadcast_tx(&new_tx).expect("insert").id;
+        assert!(pm.schedule_by_price(&id, 100_000.0, "usd", "above", 5.0).is_err());
     }
 }

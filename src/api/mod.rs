@@ -36,8 +36,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/config", post(save_config))
         .route("/api/restart", post(restart_daemon))
         .route("/api/estimate-fee", post(estimate_fee))
-        .route("/api/test-indexer", post(test_indexer))
-        .route("/api/discover-indexer", post(discover_indexer))
         .route("/api/indexer-debug", get(get_indexer_debug))
         .route("/api/btc-price", get(get_btc_price))
         .with_state(state)
@@ -129,7 +127,6 @@ fn config_to_response(config: &Config, network_changed: bool) -> ConfigResponse 
         liana_vb_enabled: config.schedule.liana_virtual_block.enabled,
         liana_vb_target_height: config.schedule.liana_virtual_block.target_height,
         liana_vb_armed_at_height: config.schedule.liana_virtual_block.armed_at_height,
-        secondary_indexer_url: config.secondary_indexer.clone().unwrap_or_default(),
         min_delay_hours: config.schedule.min_delay_hours,
         max_delay_hours: config.schedule.max_delay_hours,
         min_fee_rate: config.schedule.min_fee_rate,
@@ -141,35 +138,6 @@ fn config_to_response(config: &Config, network_changed: bool) -> ConfigResponse 
         indexer_auto_detected: !pinned && !is_manual,
         network_changed,
         supported_networks: supported_networks_vec(),
-    }
-}
-
-fn live_test_indexer_url(url: &str, network: &crate::config::NetworkType) -> bool {
-    crate::discovery::resolve_working_indexer_url(url, network).is_some()
-}
-
-/// `extract_indexer_host` only splits on `:` — it happily returns garbage like `"!!!"` as a
-/// "host". Reject anything that isn't plausibly a hostname or IP (alnum plus `.`/`-`/`_`/`:`
-/// for IPv6) so `normalize_secondary_indexer` can actually distinguish real input from noise.
-fn is_plausible_host(host: &str) -> bool {
-    !host.is_empty()
-        && host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
-}
-
-/// Normalize a user-entered secondary indexer (IP, host:port, or tcp/ssl URL). Empty → None
-/// (clears it). A value with no resolvable host → Err with a message. Uses the same normalization
-/// as the primary/external indexer so behaviour is consistent.
-fn normalize_secondary_indexer(raw: &str) -> Result<Option<String>, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let normalized = crate::discovery::normalize_indexer_url(trimmed);
-    match crate::discovery::extract_indexer_host(&normalized) {
-        Some(host) if is_plausible_host(&host) => Ok(Some(normalized)),
-        _ => Err(format!("Dirección de indexador secundario no válida: {}", raw)),
     }
 }
 
@@ -322,7 +290,7 @@ async fn import_transaction(
         tx_hex: req.tx_hex,
         network: req.network.unwrap_or(network),
         nlocktime: None,
-        broadcast_mode: None,
+        broadcast_mode: Some("imported".to_string()),
         scheduled_time: None,
         target_fee_rate: req.target_fee_rate,
         source_label: req.label,
@@ -455,10 +423,6 @@ struct StatusResponse {
     chain_height: Option<u64>,
     /// `host:port` of the configured indexer, for the degraded-mode message.
     indexer_url: String,
-    /// `host:port` of the configured secondary (tertiary-fallback) indexer, if any.
-    secondary_indexer_url: String,
-    /// Whether the secondary indexer answered on its last probe.
-    secondary_up: bool,
     /// Indexer software name (`electrs`, `Fulcrum`); `None` until known.
     indexer_software: Option<String>,
     core_ibd: bool,
@@ -493,7 +457,6 @@ struct ConfigResponse {
     liana_vb_enabled: bool,
     liana_vb_target_height: u64,
     liana_vb_armed_at_height: u64,
-    secondary_indexer_url: String,
     min_delay_hours: u64,
     max_delay_hours: u64,
     min_fee_rate: f64,
@@ -533,8 +496,6 @@ async fn get_config(State(state): State<AppState>) -> Result<Json<ConfigResponse
 
 #[derive(Deserialize)]
 struct SaveConfigRequest {
-    indexer_url: Option<String>,
-    indexer_use_ssl: Option<bool>,
     network: Option<String>,
     broadcast_mode: Option<String>,
     default_delay_hours: Option<u64>,
@@ -545,7 +506,6 @@ struct SaveConfigRequest {
     max_fee_rate: Option<f64>,
     liana_vb_enabled: Option<bool>,
     liana_vb_target_height: Option<u64>,
-    secondary_indexer: Option<String>,
 }
 
 async fn save_config(
@@ -579,65 +539,10 @@ async fn save_config(
         }
     }
 
-    let network = config.network.network_type.clone();
     let indexer_updated = if network_changed {
         tracing::info!("Network changed — scanning LAN for indexer on new network");
         let found = crate::discovery::apply_indexer_discovery(&mut config);
         found && config.indexer.is_some()
-    } else if let Some(url) = req.indexer_url {
-        if url.trim().is_empty() {
-            if crate::discovery::is_umbrel_mode() {
-                tracing::info!("Clearing manual indexer override — reconnecting to node indexer");
-                config.indexer = None;
-                let from_env = std::env::var("BROADCAST_POOL_UMBREL_ELECTRS_TCP")
-                    .ok()
-                    .map(|v| v.trim().to_string())
-                    .filter(|v| !v.is_empty() && !v.contains("${"));
-                if let Some(tcp_url) = from_env {
-                    config.indexer = Some(crate::config::IndexerConfig {
-                        url: tcp_url,
-                        manual_override: false,
-                    });
-                    true
-                } else {
-                    crate::discovery::discover_umbrel_if_needed(&mut config, true)
-                }
-            } else {
-                false
-            }
-        } else {
-            if crate::discovery::is_umbrel_mode() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "On Umbrel the node electrs is used automatically. Leave the external indexer field empty."
-                        .to_string(),
-                ));
-            }
-            if let Some(host) = crate::discovery::extract_indexer_host(&url) {
-                if crate::discovery::is_mistaken_umbrel_lan_override(&host) {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "On Umbrel use the node indexer automatically. Clear the external field and Save — \
-                         the wallet LAN IP is for Sparrow, not electrs from this container."
-                            .to_string(),
-                    ));
-                }
-            }
-            let normalized = crate::discovery::normalize_indexer_url_with_scheme(
-                &url,
-                req.indexer_use_ssl,
-            );
-            let working = crate::discovery::resolve_working_indexer_url(&normalized, &network)
-                .or_else(|| {
-                    crate::discovery::resolve_working_indexer_url(&url, &network)
-                })
-                .unwrap_or(normalized);
-            config.indexer = Some(crate::config::IndexerConfig {
-                url: working,
-                manual_override: true,
-            });
-            true
-        }
     } else {
         false
     };
@@ -694,11 +599,6 @@ async fn save_config(
         }
     }
 
-    if let Some(raw) = req.secondary_indexer {
-        let normalized = normalize_secondary_indexer(&raw)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-        config.secondary_indexer = normalized;
-    }
     tracing::info!("Config modified");
 
     crate::discovery::save_config_to_disk(&config)
@@ -753,7 +653,6 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
             .as_ref()
             .map(|i| crate::discovery::display_indexer_url(&i.url))
             .unwrap_or_default();
-        let secondary_indexer_url = cfg.secondary_indexer.clone().unwrap_or_default();
         let liana_vb_enabled = cfg.schedule.liana_virtual_block.enabled;
         let liana_vb_target_height = cfg.schedule.liana_virtual_block.target_height;
         let liana_vb_disarm_height = cfg.schedule.liana_virtual_block.armed_at_height + 10;
@@ -764,7 +663,6 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
             network_display,
             wallet_url,
             indexer_url,
-            secondary_indexer_url,
             liana_vb_enabled,
             liana_vb_target_height,
             liana_vb_disarm_height,
@@ -780,7 +678,6 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         network_display,
         wallet_url,
         indexer_url,
-        secondary_indexer_url,
         liana_vb_enabled,
         liana_vb_target_height,
         liana_vb_disarm_height,
@@ -804,8 +701,6 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         chain_source: health.source,
         chain_height: health.height,
         indexer_url,
-        secondary_indexer_url,
-        secondary_up: health.secondary_up,
         indexer_software: health.indexer_software.clone(),
         core_ibd: health.core_ibd,
         core_sync_pct: health.core_sync_pct,
@@ -877,197 +772,6 @@ async fn estimate_fee(
     result.map(Json).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
-#[derive(Deserialize)]
-struct TestIndexerRequest {
-    url: String,
-    indexer_use_ssl: Option<bool>,
-}
-
-#[derive(Serialize)]
-struct TestIndexerResponse {
-    success: bool,
-    url: String,
-    height: Option<u64>,
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    use_ssl: Option<bool>,
-}
-
-async fn test_indexer(
-    State(state): State<AppState>,
-    Json(req): Json<TestIndexerRequest>,
-) -> Result<Json<TestIndexerResponse>, (StatusCode, String)> {
-    if req.url.trim().is_empty() {
-        return Ok(Json(TestIndexerResponse {
-            success: false,
-            url: String::new(),
-            height: None,
-            error: Some("Empty indexer URL".to_string()),
-            use_ssl: None,
-        }));
-    }
-    if let Some(host) = crate::discovery::extract_indexer_host(&req.url) {
-        if crate::discovery::is_mistaken_umbrel_lan_override(&host) {
-            return Ok(Json(TestIndexerResponse {
-                success: false,
-                url: req.url.clone(),
-                height: None,
-                error: Some(
-                    "On Umbrel the node indexer connects automatically. Clear this field and Save — \
-                     the wallet LAN IP (for Sparrow) is not reachable as electrs from this app."
-                        .to_string(),
-                ),
-                use_ssl: None,
-            }));
-        }
-    }
-    let input = req.url.clone();
-    let use_ssl = req.indexer_use_ssl;
-    let network = state
-        .config
-        .lock()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .network
-        .network_type
-        .clone();
-    let normalized =
-        crate::discovery::normalize_indexer_url_with_scheme(&input, use_ssl);
-    let input_for_timeout = input.clone();
-
-    let response = tokio::task::spawn_blocking(move || {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = if let Some(working) =
-                crate::discovery::resolve_working_indexer_url(&normalized, &network)
-                    .or_else(|| crate::discovery::resolve_working_indexer_url(&input, &network))
-            {
-                let display = crate::discovery::display_indexer_url(&working);
-                let height = crate::rpc::ElectrumClient::new(&working)
-                    .ok()
-                    .and_then(|c| c.get_height().ok());
-                TestIndexerResponse {
-                    success: true,
-                    url: display,
-                    height,
-                    error: None,
-                    use_ssl: Some(crate::discovery::indexer_url_uses_ssl(&working)),
-                }
-            } else {
-                TestIndexerResponse {
-                    success: false,
-                    url: input,
-                    height: None,
-                    error: Some(
-                        "Connection failed (tried TCP and SSL on ports 50001/50002)".to_string(),
-                    ),
-                    use_ssl: None,
-                }
-            };
-            let _ = tx.send(result);
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(30))
-            .unwrap_or_else(|_| TestIndexerResponse {
-                success: false,
-                url: input_for_timeout,
-                height: None,
-                error: Some("Connection timeout (30s)".to_string()),
-                use_ssl: None,
-            })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{:?}", e)))?;
-
-    Ok(Json(response))
-}
-
-#[derive(Serialize)]
-struct DiscoverIndexerResponse {
-    success: bool,
-    indexer_url: String,
-    connected: bool,
-    height: Option<u64>,
-    message: String,
-}
-
-async fn discover_indexer(
-    State(state): State<AppState>,
-) -> Result<Json<DiscoverIndexerResponse>, (StatusCode, String)> {
-    let pool_manager = state.pool_manager.clone();
-    let config = state.config.clone();
-
-    let result = tokio::task::spawn_blocking(move || -> Result<DiscoverIndexerResponse, String> {
-        let mut cfg = config.lock().map_err(|e| e.to_string())?;
-        let found = if crate::discovery::is_umbrel_mode() {
-            crate::discovery::discover_umbrel_if_needed(&mut cfg, true)
-        } else {
-            if let Some(ref mut idx) = cfg.indexer {
-                idx.manual_override = false;
-            }
-            crate::discovery::apply_indexer_discovery(&mut cfg)
-        };
-        crate::discovery::save_config_to_disk(&cfg).map_err(|e| e.to_string())?;
-
-        let url = cfg
-            .indexer
-            .as_ref()
-            .map(|i| i.url.clone())
-            .unwrap_or_default();
-        let network_type = cfg.network.network_type.clone();
-        let fail_hint = if !found {
-            if crate::discovery::is_umbrel_mode() {
-                crate::discovery::umbrel_indexer_status_hint(&cfg, false)
-            } else {
-                "Could not find Electrs/Fulcrum on the LAN".to_string()
-            }
-        } else {
-            String::new()
-        };
-        drop(cfg);
-
-        if found && !url.is_empty() {
-            if let Err(e) = pool_manager.reconnect_indexer_from_config() {
-                tracing::warn!("Indexer discovered but reconnect failed: {}", e);
-            }
-        }
-
-        let connected = !url.is_empty() && live_test_indexer_url(&url, &network_type);
-        let height = if connected {
-            crate::discovery::resolve_working_indexer_url(&url, &network_type).and_then(|working| {
-                crate::rpc::ElectrumClient::new(&working)
-                    .ok()
-                    .and_then(|c| c.get_height().ok())
-            })
-        } else {
-            None
-        };
-
-        Ok(DiscoverIndexerResponse {
-            success: found && connected,
-            indexer_url: crate::discovery::display_indexer_url(&url),
-            connected,
-            height,
-            message: if found && connected {
-                format!(
-                    "Indexer found and connected at {}",
-                    crate::discovery::display_indexer_url(&url)
-                )
-            } else if found {
-                format!(
-                    "Indexer URL saved ({}) but connection failed",
-                    crate::discovery::display_indexer_url(&url)
-                )
-            } else {
-                fail_hint
-            },
-        })
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {}", e)))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    Ok(Json(result))
-}
-
 async fn get_indexer_debug(
     State(state): State<AppState>,
 ) -> Result<Json<crate::discovery::UmbrelIndexerDiagnostics>, (StatusCode, String)> {
@@ -1120,16 +824,5 @@ mod tests {
         assert!(validate_virtual_height(real + 10_000_000, Some(real)).is_err());
         // No real height known → gap check doesn't apply (existing None => Ok behaviour).
         assert!(validate_virtual_height(real + 10_000_000, None).is_ok());
-    }
-
-    #[test]
-    fn secondary_indexer_normalization() {
-        assert_eq!(normalize_secondary_indexer("").unwrap(), None);
-        assert_eq!(normalize_secondary_indexer("   ").unwrap(), None);
-        // IP or host:port normalizes to a tcp:// url with a port.
-        let n = normalize_secondary_indexer("192.168.1.50:50001").unwrap().unwrap();
-        assert!(n.contains("192.168.1.50:50001"), "got {}", n);
-        // Garbage with no host → error.
-        assert!(normalize_secondary_indexer("!!!").is_err());
     }
 }
