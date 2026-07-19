@@ -4,7 +4,7 @@ pub mod schema;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -257,6 +257,11 @@ impl Database {
         // Migration 008: per-row integrity MAC column.
         if let Err(e) = conn.execute_batch(schema::MIGRATION_008) {
             tracing::warn!("Migration 008 warning (non-fatal): {}", e);
+        }
+
+        // Migration 009: encrypted archive table for retired terminal-status transactions.
+        if let Err(e) = conn.execute_batch(schema::MIGRATION_009) {
+            tracing::warn!("Migration 009 warning (non-fatal): {}", e);
         }
 
         Ok(())
@@ -1027,6 +1032,112 @@ impl Database {
         let conn = self.lock_conn()?;
         conn.execute(sql, params).context("Failed to execute raw SQL")
     }
+
+    // ── Config store ────────────────────────────────────────────────
+
+    pub fn get_config_value(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT value FROM config_store WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("Failed to read config value")
+    }
+
+    pub fn set_config_value(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO config_store (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, now],
+        )
+        .context("Failed to upsert config value")?;
+        Ok(())
+    }
+
+    // ── Encrypted archive ───────────────────────────────────────────
+
+    pub fn insert_archive(&self, id: &str, network: &str, archived_at: &str, blob: &[u8]) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO archive_pool (id, network, archived_at, blob) VALUES (?1, ?2, ?3, ?4)",
+            params![id, network, archived_at, blob],
+        )
+        .context("Failed to insert archive row")?;
+        Ok(())
+    }
+
+    pub fn list_archive(&self, network: &str, limit: i64, offset: i64) -> Result<Vec<ArchiveMeta>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, network, archived_at FROM archive_pool WHERE network = ?1 ORDER BY archived_at DESC LIMIT ?2 OFFSET ?3",
+            )
+            .context("Failed to prepare archive list query")?;
+
+        let rows = stmt
+            .query_map(params![network, limit, offset], |row| {
+                Ok(ArchiveMeta {
+                    id: row.get(0)?,
+                    network: row.get(1)?,
+                    archived_at: row.get(2)?,
+                })
+            })
+            .context("Failed to query archive list")?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.context("Failed to read archive row")?);
+        }
+        Ok(items)
+    }
+
+    pub fn get_archive_blob(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT blob FROM archive_pool WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("Failed to read archive blob")
+    }
+
+    // ── Retention ───────────────────────────────────────────────────
+
+    /// Terminal-status (confirmed/failed/broadcast) rows not updated since `cutoff_rfc3339`,
+    /// eligible for archival. Returned rows are decrypted with the pool's own key.
+    pub fn select_terminal_older_than(&self, network: &str, cutoff_rfc3339: &str) -> Result<Vec<BroadcastTx>> {
+        let conn = self.lock_conn()?;
+        let sql = format!(
+            "SELECT {BROADCAST_SELECT} FROM broadcast_pool WHERE status IN ('confirmed', 'failed', 'broadcast') AND updated_at < ?1 AND network = ?2"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .context("Failed to prepare terminal-older-than query")?;
+
+        let rows = stmt
+            .query_map(params![cutoff_rfc3339, network], |row| {
+                map_broadcast_row(row, self.key())
+            })
+            .context("Failed to query terminal-older-than txs")?;
+
+        let mut txs = Vec::new();
+        for row in rows {
+            txs.push(row.context("Failed to read row")?);
+        }
+        Ok(txs)
+    }
+
+    pub fn delete_broadcast_tx(&self, id: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute("DELETE FROM broadcast_pool WHERE id = ?1", params![id])
+            .context("Failed to delete broadcast tx")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1373,6 +1484,28 @@ mod tests {
         let got = db.get_broadcast_tx_by_id(&stored.id).unwrap();
         assert_eq!(got.destination_address.as_deref(), Some("addrX"));
         assert_ne!(got.tampered, Some(true));
+    }
+
+    #[test]
+    fn config_store_get_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("c.db")).unwrap();
+        assert_eq!(db.get_config_value("k").unwrap(), None);
+        db.set_config_value("k", "v").unwrap();
+        assert_eq!(db.get_config_value("k").unwrap(), Some("v".into()));
+        db.set_config_value("k", "v2").unwrap(); // upsert
+        assert_eq!(db.get_config_value("k").unwrap(), Some("v2".into()));
+    }
+
+    #[test]
+    fn archive_insert_list_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("a.db")).unwrap();
+        db.insert_archive("id1", "testnet4", "2026-06-01T00:00:00Z", b"blob-bytes").unwrap();
+        let list = db.list_archive("testnet4", 10, 0).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "id1");
+        assert_eq!(db.get_archive_blob("id1").unwrap().unwrap(), b"blob-bytes");
     }
 }
 

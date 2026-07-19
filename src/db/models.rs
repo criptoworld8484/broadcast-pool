@@ -224,6 +224,13 @@ pub struct MempoolStatus {
     pub congestion: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveMeta {
+    pub id: String,
+    pub network: String,
+    pub archived_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub connected: bool,
