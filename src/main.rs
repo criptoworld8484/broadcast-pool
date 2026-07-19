@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod crypto;
 mod db;
 mod discovery;
 mod electrum_server;
