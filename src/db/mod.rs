@@ -77,6 +77,10 @@ impl Database {
 
         let mut updated = 0;
         for (id, hex) in rows {
+            let hex = crate::crypto::decode_field(&self.key, &hex, id.as_bytes()).unwrap_or_else(|e| {
+                tracing::error!("field decrypt failed for {}: {}", id, e);
+                hex
+            });
             if let Some(btc) = output_value_btc_from_hex(&hex) {
                 if btc > 0.0 {
                     conn.execute(
@@ -183,6 +187,14 @@ impl Database {
             .or_else(|| output_value_btc_from_hex(&tx.tx_hex))
             .unwrap_or(0.0);
 
+        // Encrypt sensitive fields at rest. Computed AFTER the plaintext-dependent
+        // total_value_btc derivation above, using the row id as AEAD associated data.
+        let enc_tx_hex = crate::crypto::encode_field(&self.key, &tx.tx_hex, id.as_bytes());
+        let enc_dest = tx.destination_address.as_ref()
+            .map(|d| crate::crypto::encode_field(&self.key, d, id.as_bytes()));
+        let enc_source = tx.source_label.as_ref()
+            .map(|s| crate::crypto::encode_field(&self.key, s, id.as_bytes()));
+
         {
             let conn = self.lock_conn()?;
             conn.execute(
@@ -190,15 +202,15 @@ impl Database {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     id,
-                    tx.tx_hex,
+                    enc_tx_hex,
                     status,
                     tx.network,
                     nlocktime,
                     broadcast_mode,
                     scheduled,
                     tx.target_fee_rate,
-                    tx.source_label,
-                    tx.destination_address,
+                    enc_source,
+                    enc_dest,
                     tx.utxo_count.unwrap_or(1),
                     total_value_btc,
                     tx.replacement_of,
@@ -217,7 +229,7 @@ impl Database {
         conn.query_row(
             &format!("SELECT {BROADCAST_SELECT} FROM broadcast_pool WHERE id = ?1"),
             params![id],
-            |row| map_broadcast_row(row),
+            |row| map_broadcast_row(row, &self.key),
         )
         .context("Failed to get broadcast tx")
     }
@@ -225,7 +237,7 @@ impl Database {
     pub fn list_broadcast_txs(&self, status_filter: Option<&str>, network: &str, limit: i32) -> Result<Vec<BroadcastTx>> {
         let conn = self.lock_conn()?;
 
-        let map_row = map_broadcast_row;
+        let map_row = |row: &rusqlite::Row| map_broadcast_row(row, &self.key);
 
         let mut txs = Vec::new();
 
@@ -322,7 +334,7 @@ impl Database {
             .context("Failed to prepare due query")?;
 
         let rows = stmt
-            .query_map(params![network], map_broadcast_row)
+            .query_map(params![network], |row| map_broadcast_row(row, &self.key))
             .context("Failed to query due txs")?;
 
         let mut txs = Vec::new();
@@ -401,7 +413,7 @@ impl Database {
             .context("Failed to prepare price-triggered query")?;
 
         let rows = stmt
-            .query_map(params![network], map_broadcast_row)
+            .query_map(params![network], |row| map_broadcast_row(row, &self.key))
             .context("Failed to query price-triggered txs")?;
 
         let mut txs = Vec::new();
@@ -421,7 +433,7 @@ impl Database {
             .context("Failed to prepare pending by block height query")?;
 
         let rows = stmt
-            .query_map(params![network], map_broadcast_row)
+            .query_map(params![network], |row| map_broadcast_row(row, &self.key))
             .context("Failed to query pending by block height txs")?;
 
         let mut txs = Vec::new();
@@ -442,7 +454,7 @@ impl Database {
             .context("Failed to prepare pending by scheduled time query")?;
 
         let rows = stmt
-            .query_map(params![network], map_broadcast_row)
+            .query_map(params![network], |row| map_broadcast_row(row, &self.key))
             .context("Failed to query pending by scheduled time txs")?;
 
         let mut txs = Vec::new();
@@ -474,7 +486,7 @@ impl Database {
             .context("Failed to prepare rebroadcast query")?;
 
         let rows = stmt
-            .query_map(params![cutoff, network], map_broadcast_row)
+            .query_map(params![cutoff, network], |row| map_broadcast_row(row, &self.key))
             .context("Failed to query rebroadcast txs")?;
 
         let mut txs = Vec::new();
@@ -804,6 +816,34 @@ impl Database {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sensitive_fields_are_encrypted_at_rest_and_decrypted_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("e.db")).unwrap();
+        let hex = tx_hex_with_output_sats(&[10_000]);
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: hex.clone(), network: "testnet4".into(), nlocktime: None,
+            broadcast_mode: Some("imported".into()), scheduled_time: None,
+            target_fee_rate: None, source_label: Some("wallet-A".into()),
+            destination_address: Some("tb1qexampleaddr".into()),
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let stored = db.insert_broadcast_tx(&new_tx).unwrap();
+
+        // Read-back returns plaintext.
+        let got = db.get_broadcast_tx_by_id(&stored.id).unwrap();
+        assert_eq!(got.tx_hex, hex);
+        assert_eq!(got.destination_address.as_deref(), Some("tb1qexampleaddr"));
+        assert_eq!(got.source_label.as_deref(), Some("wallet-A"));
+
+        // Raw column is NOT plaintext.
+        let raw: String = db.lock_conn().unwrap()
+            .query_row("SELECT destination_address FROM broadcast_pool WHERE id=?1",
+                params![stored.id], |r| r.get(0)).unwrap();
+        assert!(raw.starts_with("enc:v1:"), "stored value must be encrypted, got {raw}");
+        assert!(!raw.contains("tb1qexampleaddr"));
+    }
+
     // Before Task 2, dashboard-imported txs were persisted with broadcast_mode = "immediate"
     // (the DB default for a None mode). A real "immediate" tx is broadcast at once and never
     // lingers as pending, so any row that is both "immediate" and "pending" is safely known to
@@ -973,10 +1013,17 @@ fn parse_optional_datetime(s: Option<String>) -> Option<DateTime<Utc>> {
     s.map(|s| parse_datetime(&s))
 }
 
-fn map_broadcast_row(row: &rusqlite::Row) -> rusqlite::Result<BroadcastTx> {
+fn map_broadcast_row(row: &rusqlite::Row, key: &[u8; 32]) -> rusqlite::Result<BroadcastTx> {
+    let id: String = row.get(0)?;
+    let dec = |s: String| {
+        crate::crypto::decode_field(key, &s, id.as_bytes()).unwrap_or_else(|e| {
+            tracing::error!("field decrypt failed for {}: {}", id, e);
+            s
+        })
+    };
     Ok(BroadcastTx {
-        id: row.get(0)?,
-        tx_hex: row.get(1)?,
+        tx_hex: dec(row.get::<_, String>(1)?),
+        id: id.clone(),
         txid: row.get(2)?,
         status: TxStatus::from_str(&row.get::<_, String>(3)?),
         network: row.get(4)?,
@@ -988,8 +1035,8 @@ fn map_broadcast_row(row: &rusqlite::Row) -> rusqlite::Result<BroadcastTx> {
         block_height: row.get(10)?,
         target_fee_rate: row.get(11)?,
         actual_fee_rate: row.get(12)?,
-        source_label: row.get(13)?,
-        destination_address: row.get(14)?,
+        source_label: row.get::<_, Option<String>>(13)?.map(dec),
+        destination_address: row.get::<_, Option<String>>(14)?.map(dec),
         utxo_count: row.get(15)?,
         total_value_btc: row.get(16)?,
         replacement_of: row.get(17)?,
