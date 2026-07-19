@@ -526,6 +526,7 @@ async fn main() -> Result<()> {
                 pool_manager: pool_manager.clone(),
                 db,
                 config: shared_config.clone(),
+                archive_keys: std::sync::Arc::new(api::ArchiveKeyStore::new()),
             };
             let app = api::router(app_state);
             let bind_addr = format!("{}:{}", config.web.host, config.web.port);

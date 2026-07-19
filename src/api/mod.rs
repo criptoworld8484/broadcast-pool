@@ -13,11 +13,15 @@ use crate::db::models::*;
 use crate::db::Database;
 use crate::pool::manager::PoolManager;
 
+mod archive_key;
+pub use archive_key::ArchiveKeyStore;
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool_manager: Arc<PoolManager>,
     pub db: Arc<Database>,
     pub config: Arc<std::sync::Mutex<Config>>,
+    pub archive_keys: Arc<ArchiveKeyStore>,
 }
 
 pub fn router(state: AppState) -> Router {
