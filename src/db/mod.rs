@@ -42,7 +42,39 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.run_migrations()?;
+        // Backfill total_value_btc for rows persisted before value-derivation existed (non-fatal).
+        if let Err(e) = db.backfill_output_values() {
+            tracing::warn!("Output-value backfill warning (non-fatal): {}", e);
+        }
         Ok(db)
+    }
+
+    /// Recompute total_value_btc from the stored tx hex for rows that have no value yet
+    /// (legacy rows persisted as 0). Returns the number of rows updated.
+    pub fn backfill_output_values(&self) -> Result<usize> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, tx_hex FROM broadcast_pool WHERE total_value_btc = 0 OR total_value_btc IS NULL",
+        )?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        let mut updated = 0;
+        for (id, hex) in rows {
+            if let Some(btc) = output_value_btc_from_hex(&hex) {
+                if btc > 0.0 {
+                    conn.execute(
+                        "UPDATE broadcast_pool SET total_value_btc = ?1 WHERE id = ?2",
+                        params![btc, id],
+                    )?;
+                    updated += 1;
+                }
+            }
+        }
+        Ok(updated)
     }
 
     fn run_migrations(&self) -> Result<()> {
@@ -130,6 +162,13 @@ impl Database {
         let scheduled = tx.scheduled_time.map(|t| t.to_rfc3339());
         let nlocktime = tx.nlocktime.unwrap_or(0);
         let broadcast_mode = tx.broadcast_mode.clone().unwrap_or_else(|| "immediate".to_string());
+        // Every add path (API import, electrum intercept, virtual-block) passes total_value_btc:
+        // None; derive it from the tx's outputs so the pool-value stat isn't stuck at 0. An
+        // explicit value (e.g. from the migration importer) is preserved.
+        let total_value_btc = tx
+            .total_value_btc
+            .or_else(|| output_value_btc_from_hex(&tx.tx_hex))
+            .unwrap_or(0.0);
 
         {
             let conn = self.lock_conn()?;
@@ -148,7 +187,7 @@ impl Database {
                     tx.source_label,
                     tx.destination_address,
                     tx.utxo_count.unwrap_or(1),
-                    tx.total_value_btc.unwrap_or(0.0),
+                    total_value_btc,
                     tx.replacement_of,
                     now,
                     now,
@@ -506,7 +545,11 @@ impl Database {
         for row in rows {
             let (status, count, value) = row?;
             stats.total_transactions += count as usize;
-            stats.total_value_btc += value;
+            // Failed txs never leave the pool, so their value doesn't count toward the
+            // "waiting or broadcast" pool total (counts above still include them).
+            if status != "failed" {
+                stats.total_value_btc += value;
+            }
             match status.as_str() {
                 "pending" => stats.pending = count as usize,
                 "scheduled" => stats.scheduled = count as usize,
@@ -769,6 +812,115 @@ mod tests {
         assert_eq!(tx.broadcast_mode.as_deref(), Some("imported"));
     }
 
+    // Build a consensus-encodable tx (1 dummy input to avoid the 0-input/segwit-marker
+    // ambiguity) with the given output values in sats; return its hex.
+    #[cfg(test)]
+    fn tx_hex_with_output_sats(sats: &[u64]) -> String {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::transaction::Version;
+        use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: sats
+                .iter()
+                .map(|s| TxOut {
+                    value: Amount::from_sat(*s),
+                    script_pubkey: ScriptBuf::new(),
+                })
+                .collect(),
+        };
+        hex::encode(bitcoin::consensus::serialize(&tx))
+    }
+
+    // When a tx is inserted without an explicit total_value_btc (all API/electrum/import paths
+    // pass None), the value must be derived from the tx hex — the sum of its outputs — instead of
+    // silently defaulting to 0. Otherwise the dashboard's pool-value stat is always 0.
+    #[test]
+    fn insert_derives_total_value_from_outputs_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("v.db")).unwrap();
+        let hex = tx_hex_with_output_sats(&[12_345, 67_890]); // 80_235 sats total
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: hex, network: "testnet4".into(), nlocktime: None,
+            broadcast_mode: Some("imported".into()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let stored = db.insert_broadcast_tx(&new_tx).unwrap();
+        assert_eq!((stored.total_value_btc * 1e8).round() as u64, 80_235);
+    }
+
+    // An explicitly provided value must be preserved (not overwritten by the hex-derived sum),
+    // since the migration importer sets total_value_btc from its own source.
+    #[test]
+    fn insert_preserves_explicit_total_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("ve.db")).unwrap();
+        let hex = tx_hex_with_output_sats(&[50_000]);
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: hex, network: "testnet4".into(), nlocktime: None,
+            broadcast_mode: Some("imported".into()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: Some(1.5), replacement_of: None,
+        };
+        let stored = db.insert_broadcast_tx(&new_tx).unwrap();
+        assert_eq!(stored.total_value_btc, 1.5);
+    }
+
+    // Rows persisted before value-derivation existed have total_value_btc = 0. The backfill
+    // recomputes them from the stored hex; a row that already has a value is left untouched.
+    #[test]
+    fn backfill_recomputes_zero_value_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("b.db")).unwrap();
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: tx_hex_with_output_sats(&[123_456]), network: "testnet4".into(), nlocktime: None,
+            broadcast_mode: Some("imported".into()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let stored = db.insert_broadcast_tx(&new_tx).unwrap();
+        // Simulate a legacy row: force its value back to 0.
+        db.lock_conn().unwrap()
+            .execute("UPDATE broadcast_pool SET total_value_btc = 0 WHERE id = ?1", params![stored.id])
+            .unwrap();
+
+        let updated = db.backfill_output_values().unwrap();
+        assert_eq!(updated, 1);
+        let row = db.get_broadcast_tx_by_id(&stored.id).unwrap();
+        assert_eq!((row.total_value_btc * 1e8).round() as u64, 123_456);
+    }
+
+    // The pool-value stat counts sats waiting to be broadcast and already broadcast, but NOT
+    // failed txs (they will never leave the pool). Counts still include every row.
+    #[test]
+    fn pool_stats_value_excludes_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("s.db")).unwrap();
+        let mk = || crate::db::models::NewBroadcastTx {
+            tx_hex: tx_hex_with_output_sats(&[50_000]), network: "testnet4".into(), nlocktime: None,
+            broadcast_mode: Some("imported".into()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let keep = db.insert_broadcast_tx(&mk()).unwrap();
+        let fail = db.insert_broadcast_tx(&mk()).unwrap();
+        let _ = keep;
+        db.update_tx_status(&fail.id, TxStatus::Failed, Some("boom")).unwrap();
+
+        let stats = db.get_pool_stats("testnet4").unwrap();
+        assert_eq!(stats.total_transactions, 2, "counts include failed rows");
+        assert_eq!(stats.failed, 1);
+        assert_eq!((stats.total_value_btc * 1e8).round() as u64, 50_000, "value excludes failed");
+    }
+
     // Running the migration twice must be safe (idempotent) — re-running it on an already
     // reclassified row must not error and must leave the row as "imported".
     #[test]
@@ -787,6 +939,15 @@ mod tests {
         let tx = db.get_broadcast_tx_by_id(&id).unwrap();
         assert_eq!(tx.broadcast_mode.as_deref(), Some("imported"));
     }
+}
+
+/// Sum a transaction's output values (from its raw hex) and return the total in BTC.
+/// Returns None if the hex can't be decoded as a transaction.
+fn output_value_btc_from_hex(tx_hex: &str) -> Option<f64> {
+    let raw = hex::decode(tx_hex.trim()).ok()?;
+    let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&raw).ok()?;
+    let sats: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
+    Some(sats as f64 / 100_000_000.0)
 }
 
 fn parse_datetime(s: &str) -> DateTime<Utc> {

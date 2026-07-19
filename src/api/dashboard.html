@@ -891,7 +891,7 @@
                     <div class="stat-card">
                         <div class="label" data-i18n="stat_value">Value</div>
                         <div class="value" id="s-value" style="color: var(--text);">0</div>
-                        <div class="sub" data-i18n="stat_value_sub">BTC in pool</div>
+                        <div class="sub" data-i18n="stat_value_sub">sats in pool</div>
                     </div>
                     <div class="stat-card price">
                         <div class="label" data-i18n="stat_btc_price">BTC Price</div>
@@ -1259,7 +1259,7 @@
                 stat_mempool_unavailable: 'Bitcoin node not connected',
                 stat_mempool_cong_low: 'Low', stat_mempool_cong_medium: 'Medium', stat_mempool_cong_high: 'High',
                 stat_total: 'Total', stat_total_sub: 'All transactions',
-                stat_value: 'Value', stat_value_sub: 'BTC in pool',
+                stat_value: 'Value', stat_value_sub: 'sats in pool',
                 stat_btc_price: 'BTC Price', stat_btc_price_sub: 'Live spot price',
                 stat_btc_price_stale: 'Cached price',
                 import_title: 'Import Transaction', import_hex: 'Raw transaction hex (02000000...)', import_label: 'Label (optional)', import_fee: 'Target Fee (sat/vB)', import_btn: 'Import', import_schedule_all: 'Schedule All',
@@ -1382,7 +1382,7 @@
                 stat_mempool_unavailable: 'Nodo Bitcoin no conectado',
                 stat_mempool_cong_low: 'Baja', stat_mempool_cong_medium: 'Media', stat_mempool_cong_high: 'Alta',
                 stat_total: 'Total', stat_total_sub: 'Todas las transacciones',
-                stat_value: 'Valor', stat_value_sub: 'BTC en el pool',
+                stat_value: 'Valor', stat_value_sub: 'sats en el pool',
                 stat_btc_price: 'Precio BTC', stat_btc_price_sub: 'Precio spot en vivo',
                 stat_btc_price_stale: 'Precio en cach\u00e9',
                 import_title: 'Importar Transacci\u00f3n', import_hex: 'Hex de transacci\u00f3n cruda (02000000...)', import_label: 'Etiqueta (opcional)', import_fee: 'Tarifa Objetivo (sat/vB)', import_btn: 'Importar', import_schedule_all: 'Programar Todas',
@@ -1967,7 +1967,8 @@
                 document.getElementById('s-broadcast').textContent = stats.broadcast;
                 document.getElementById('s-confirmed').textContent = stats.confirmed;
                 document.getElementById('s-total').textContent = stats.total_transactions;
-                document.getElementById('s-value').textContent = stats.total_value_btc.toFixed(8);
+                const poolSats = Math.round((stats.total_value_btc || 0) * 1e8);
+                document.getElementById('s-value').textContent = poolSats.toLocaleString();
 
                 const tbody = document.getElementById('tx-list');
                 if (!allTxs.length) {
