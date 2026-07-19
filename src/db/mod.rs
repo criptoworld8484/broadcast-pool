@@ -1,3 +1,4 @@
+pub mod keyfile;
 pub mod models;
 pub mod schema;
 
@@ -14,9 +15,14 @@ const BROADCAST_SELECT: &str = "id, tx_hex, txid, status, network, nlocktime, br
 
 pub struct Database {
     conn: Mutex<Connection>,
+    key: [u8; 32],
 }
 
 impl Database {
+    pub(crate) fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn.lock().map_err(|e| {
             // #region agent log
@@ -38,8 +44,15 @@ impl Database {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .context("Failed to set pragmas")?;
 
+        let key_path = db_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("pool.key");
+        let key = keyfile::load_or_create(&key_path)?;
+
         let db = Self {
             conn: Mutex::new(conn),
+            key,
         };
         db.run_migrations()?;
         // Backfill total_value_btc for rows persisted before value-derivation existed (non-fatal).
