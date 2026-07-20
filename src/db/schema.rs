@@ -102,3 +102,19 @@ pub const MIGRATION_007: &str = r#"
 UPDATE broadcast_pool SET broadcast_mode = 'imported'
 WHERE broadcast_mode = 'immediate' AND status = 'pending';
 "#;
+
+pub const MIGRATION_008: &str = r#"
+ALTER TABLE broadcast_pool ADD COLUMN row_mac TEXT;
+"#;
+
+pub const MIGRATION_009: &str = r#"
+CREATE TABLE IF NOT EXISTS archive_pool (
+    id TEXT PRIMARY KEY,
+    network TEXT NOT NULL,
+    archived_at TEXT NOT NULL,
+    blob BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_archive_network_archived_at ON archive_pool(network, archived_at);
+"#;

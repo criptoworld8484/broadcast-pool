@@ -55,6 +55,11 @@ pub struct PoolManager {
     price_feed: PriceFeed,
     /// Broadcast channel for scripthash state changes (virtual mempool add/remove).
     scripthash_notifications: tokio::sync::broadcast::Sender<ScripthashNotification>,
+    /// Global broadcast halt. Set when a row_mac mismatch (tampered row) is detected; cleared only
+    /// by an explicit admin acknowledgement via `/api/security/acknowledge`.
+    safe_mode: Arc<AtomicBool>,
+    /// Ids of tampered rows detected while safe mode is active, for the dashboard banner.
+    tampered_ids: Arc<Mutex<Vec<String>>>,
 }
 
 /// A tx the user schedules by hand from the dashboard: retained wallet txs under manual mode and
@@ -83,7 +88,40 @@ impl PoolManager {
             health_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             price_feed: PriceFeed::new(),
             scripthash_notifications,
+            safe_mode: Arc::new(AtomicBool::new(false)),
+            tampered_ids: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Keyfile encryption key, for call sites that only hold a `PoolManager` and need to
+    /// encrypt/decrypt config fields (e.g. `bitcoin_rpc.password`) before persisting.
+    pub(crate) fn db_key(&self) -> &[u8; 32] {
+        self.db.key()
+    }
+
+    pub fn is_safe_mode(&self) -> bool {
+        self.safe_mode.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn enter_safe_mode(&self, id: &str) {
+        self.safe_mode.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut v) = self.tampered_ids.lock() {
+            if !v.iter().any(|x| x == id) {
+                v.push(id.to_string());
+            }
+        }
+        tracing::error!("SAFE MODE: tampered row {} detected — broadcasting halted", id);
+    }
+
+    pub fn clear_safe_mode(&self) {
+        self.safe_mode.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut v) = self.tampered_ids.lock() {
+            v.clear();
+        }
+    }
+
+    pub fn tampered_ids(&self) -> Vec<String> {
+        self.tampered_ids.lock().map(|v| v.clone()).unwrap_or_default()
     }
 
     /// Subscribe to scripthash state change notifications.
@@ -425,6 +463,10 @@ impl PoolManager {
     }
 
     pub fn broadcast_due_transactions(&self) -> Result<Vec<(String, Result<String>)>> {
+        if self.is_safe_mode() {
+            tracing::warn!("SAFE MODE active — skipping broadcast_due_transactions (global halt)");
+            return Ok(Vec::new());
+        }
         let network = {
             let config = self.config.lock().map_err(|e| anyhow::anyhow!("Config lock failed: {}", e))?;
             config.network.network_type.data_dir_name().to_string()
@@ -438,6 +480,15 @@ impl PoolManager {
         let mut results = Vec::new();
 
         for tx in due_txs {
+            // Global halt: once safe mode is active (from this or a prior iteration),
+            // stop processing the rest of the batch — nothing may broadcast.
+            if self.is_safe_mode() {
+                break;
+            }
+            if tx.tampered == Some(true) {
+                self.enter_safe_mode(&tx.id);
+                break;
+            }
             if !self.is_locktime_satisfied(tx.nlocktime)? {
                 if tx.nlocktime.is_some_and(|n| n > 500_000_000) {
                     if tx.broadcast_missed_at.is_none() {
@@ -588,6 +639,10 @@ impl PoolManager {
             serde_json::json!({}),
         );
         // #endregion
+        if self.is_safe_mode() {
+            tracing::warn!("SAFE MODE active — skipping scheduler tick (global halt, awaiting admin acknowledge)");
+            return Ok(Vec::new());
+        }
         // The scheduler needs a height and an MTP, not the address index — so Bitcoin Core alone
         // is enough to keep honouring schedules while electrs/Fulcrum is down.
         if !self.chain_clock_available() {
@@ -600,6 +655,15 @@ impl PoolManager {
         };
 
         for tx in self.get_pending_by_scheduled_time(&network)? {
+            // Global halt: stop advancing further pending txs to due once safe mode
+            // is active, for consistency with the broadcast-side halt.
+            if self.is_safe_mode() {
+                break;
+            }
+            if tx.tampered == Some(true) {
+                self.enter_safe_mode(&tx.id);
+                break;
+            }
             if !(is_user_scheduled_mode(tx.broadcast_mode.as_deref())
                 || tx.broadcast_mode.as_deref() == Some("scheduled"))
             {
@@ -1144,7 +1208,7 @@ impl PoolManager {
             cfg.schedule.liana_virtual_block.enabled = false;
             cfg.clone()
         };
-        if let Err(e) = crate::discovery::save_config_to_disk(&snapshot) {
+        if let Err(e) = crate::discovery::save_config_to_disk(&snapshot, self.db.key()) {
             tracing::warn!("Failed to persist virtual-block disarm: {}", e);
         }
     }
@@ -1453,6 +1517,20 @@ mod tests {
         (PoolManager::new(db, None, None, config), dir)
     }
 
+    // Detecting a tampered row (HMAC mismatch) must flip a global halt: no broadcasting until an
+    // admin acknowledges, and the tampered tx id must be reported for the dashboard banner.
+    #[test]
+    fn safe_mode_toggles_and_reports_ids() {
+        let (pm, _dir) = test_manager();
+        assert!(!pm.is_safe_mode());
+        pm.enter_safe_mode("abc");
+        assert!(pm.is_safe_mode());
+        assert_eq!(pm.tampered_ids(), vec!["abc".to_string()]);
+        pm.clear_safe_mode();
+        assert!(!pm.is_safe_mode());
+        assert!(pm.tampered_ids().is_empty());
+    }
+
     // With neither an indexer nor Bitcoin Core, there is no chain clock: the tick must refuse to
     // run rather than silently do nothing, so the broadcast loop can back off and the dashboard
     // can tell the user schedules are paused.
@@ -1596,5 +1674,96 @@ mod tests {
         };
         let id = pm.get_db().insert_broadcast_tx(&new_tx).expect("insert").id;
         assert!(pm.schedule_by_price(&id, 100_000.0, "usd", "above", 5.0).is_err());
+    }
+
+    // Regression for the Critical: safe mode is a GLOBAL broadcast halt. get_due_transactions has
+    // no ORDER BY, so a batch containing a tampered row anywhere must stop the ENTIRE batch — a
+    // clean tx sitting elsewhere in the same batch must never reach broadcast_transaction() once
+    // the tampered row is (or was already) detected. Without the fix, the loop only `continue`d
+    // past the tampered row and kept broadcasting the rest of the batch.
+    //
+    // There is no live broadcast backend in this harness (no indexer/RPC configured), so a clean
+    // due tx that DOES reach broadcast_transaction() fails with "No broadcast backend available"
+    // and gets persisted as TxStatus::Failed by the existing error path. That failure write is the
+    // observable signal this test uses: if the clean tx's status changes away from `Scheduled` at
+    // all, the loop attempted to broadcast it after the tampered row was seen — exactly the bug.
+    #[test]
+    fn tampered_row_halts_the_whole_batch_clean_tx_never_attempted() {
+        let (pm, _dir) = test_manager();
+        let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+
+        let insert_due = |pm: &PoolManager| -> String {
+            let new_tx = crate::db::models::NewBroadcastTx {
+                tx_hex: "00".to_string(),
+                network: "testnet4".to_string(),
+                nlocktime: None,
+                broadcast_mode: Some("imported".to_string()),
+                scheduled_time: None,
+                target_fee_rate: None,
+                source_label: None,
+                destination_address: None,
+                utxo_count: Some(1),
+                total_value_btc: None,
+                replacement_of: None,
+            };
+            let id = pm.get_db().insert_broadcast_tx(&new_tx).expect("insert").id;
+            // Moves status -> 'scheduled', sets scheduled_time in the past, and reseals row_mac
+            // (mirrors the app-level "scheduled" transition, so it is untampered on read-back).
+            pm.get_db()
+                .update_reschedule(&id, &past, None, 3.0)
+                .expect("reschedule");
+            id
+        };
+
+        let id_a = insert_due(&pm);
+        let id_b = insert_due(&pm);
+
+        // Don't assume SQL row order — ask the same query the manager uses and tamper whichever
+        // row it happens to return FIRST, so the test exercises the exact
+        // [tampered, clean, ...] ordering the Critical was about, deterministically.
+        let due_order = pm
+            .get_db()
+            .get_due_transactions("testnet4")
+            .expect("query due");
+        assert_eq!(due_order.len(), 2, "both rows must be due");
+        let tampered_id = due_order[0].id.clone();
+        let clean_id = due_order[1].id.clone();
+        assert!(
+            (tampered_id == id_a && clean_id == id_b) || (tampered_id == id_b && clean_id == id_a)
+        );
+
+        // Tamper a MAC-covered column directly via SQL, bypassing the app layer (same technique
+        // as tampering_schedule_is_detected_by_row_mac in db/mod.rs), while keeping it still due.
+        pm.get_db()
+            .execute_raw(
+                "UPDATE broadcast_pool SET scheduled_time = '1999-01-01T00:00:00Z' WHERE id = ?1",
+                &[&tampered_id.as_str()],
+            )
+            .expect("tamper row");
+        assert_eq!(
+            pm.get_db().get_broadcast_tx_by_id(&tampered_id).unwrap().tampered,
+            Some(true),
+            "tamper must be detected on read-back"
+        );
+
+        let results = pm.broadcast_due_transactions().expect("broadcast_due_transactions");
+
+        assert!(pm.is_safe_mode(), "tampered row must trip the global halt");
+        assert_eq!(
+            pm.tampered_ids(),
+            vec![tampered_id.clone()],
+            "the tampered row must be reported for the dashboard banner"
+        );
+        assert!(
+            results.is_empty(),
+            "no tx (tampered or clean) may appear in the broadcast results once safe mode trips"
+        );
+
+        let clean_after = pm.get_db().get_broadcast_tx_by_id(&clean_id).unwrap();
+        assert_eq!(
+            clean_after.status,
+            TxStatus::Scheduled,
+            "clean tx must be left untouched (not attempted, not Failed) once safe mode is active"
+        );
     }
 }

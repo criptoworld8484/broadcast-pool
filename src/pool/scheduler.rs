@@ -3,20 +3,35 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
+use crate::api::ArchiveKeyStore;
 use crate::config::Config;
+use crate::db::Database;
 use crate::pool::manager::{PoolManager, NO_CHAIN_SOURCE};
 
 const BROADCAST_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const RETENTION_INTERVAL: Duration = Duration::from_secs(86_400);
 
 pub struct Scheduler {
     pool_manager: Arc<PoolManager>,
     config: Arc<Mutex<Config>>,
+    db: Arc<Database>,
+    archive_keys: Arc<ArchiveKeyStore>,
 }
 
 impl Scheduler {
-    pub fn new(pool_manager: Arc<PoolManager>, config: Arc<Mutex<Config>>) -> Self {
-        Self { pool_manager, config }
+    pub fn new(
+        pool_manager: Arc<PoolManager>,
+        config: Arc<Mutex<Config>>,
+        db: Arc<Database>,
+        archive_keys: Arc<ArchiveKeyStore>,
+    ) -> Self {
+        Self {
+            pool_manager,
+            config,
+            db,
+            archive_keys,
+        }
     }
 
     pub async fn run_broadcast_loop(&self) -> Result<()> {
@@ -30,6 +45,18 @@ impl Scheduler {
 
         loop {
             let start = Instant::now();
+
+            if self.pool_manager.is_safe_mode() {
+                tracing::warn!(
+                    "SAFE MODE active — broadcast loop paused (tampered row detected, awaiting admin acknowledge via /api/security/acknowledge)"
+                );
+                let elapsed = start.elapsed();
+                if elapsed < BROADCAST_CHECK_INTERVAL {
+                    sleep(BROADCAST_CHECK_INTERVAL - elapsed).await;
+                }
+                continue;
+            }
+
             let pool_manager = self.pool_manager.clone();
 
             let tick = tokio::task::spawn_blocking(move || pool_manager.run_scheduler_tick()).await;
@@ -257,12 +284,67 @@ impl Scheduler {
         }
     }
 
+    /// Daily retention sweep: while the archive is unlocked (key present in memory), moves
+    /// terminal txs older than `expiry_days` into the encrypted archive and deletes them from
+    /// the active pool. While locked, this is a no-op tick — retention simply pauses rather than
+    /// erroring, since the key may become available again on a later tick.
+    pub async fn run_retention_loop(&self) -> Result<()> {
+        tracing::info!(
+            "Starting retention loop (interval: {}s)",
+            RETENTION_INTERVAL.as_secs()
+        );
+
+        loop {
+            let archive_keys = self.archive_keys.clone();
+            let db = self.db.clone();
+            let config = self.config.clone();
+
+            let result = tokio::task::spawn_blocking(move || -> Result<()> {
+                let key = match archive_keys.key() {
+                    Some(key) => key,
+                    None => {
+                        tracing::debug!("archive locked, retention paused");
+                        return Ok(());
+                    }
+                };
+
+                let (network, expiry_days) = {
+                    let config = config
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
+                    (
+                        config.network.network_type.data_dir_name().to_string(),
+                        config.pool.expiry_days,
+                    )
+                };
+
+                let cutoff = (chrono::Utc::now() - chrono::Duration::days(expiry_days as i64))
+                    .to_rfc3339();
+
+                let moved = db.archive_terminal_older_than(&key, &network, &cutoff)?;
+                tracing::info!("Retention: archived {} terminal tx(s) for {}", moved, network);
+                Ok(())
+            })
+            .await;
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::error!("Retention loop tick failed: {}", e),
+                Err(e) => tracing::error!("Retention loop task failed: {}", e),
+            }
+
+            sleep(RETENTION_INTERVAL).await;
+        }
+    }
+
     pub async fn start_all_loops(&self) -> Result<()> {
         let pool_manager = self.pool_manager.clone();
         let config = self.config.clone();
+        let db = self.db.clone();
+        let archive_keys = self.archive_keys.clone();
 
         tokio::spawn(async move {
-            let scheduler = Scheduler::new(pool_manager, config);
+            let scheduler = Scheduler::new(pool_manager, config, db, archive_keys);
             if let Err(e) = scheduler.run_health_poller().await {
                 tracing::error!("Chain health poller error: {}", e);
             }
@@ -270,9 +352,11 @@ impl Scheduler {
 
         let pool_manager = self.pool_manager.clone();
         let config = self.config.clone();
+        let db = self.db.clone();
+        let archive_keys = self.archive_keys.clone();
 
         tokio::spawn(async move {
-            let scheduler = Scheduler::new(pool_manager, config);
+            let scheduler = Scheduler::new(pool_manager, config, db, archive_keys);
             if let Err(e) = scheduler.run_broadcast_loop().await {
                 tracing::error!("Broadcast loop error: {}", e);
             }
@@ -280,9 +364,11 @@ impl Scheduler {
 
         let pool_manager = self.pool_manager.clone();
         let config = self.config.clone();
+        let db = self.db.clone();
+        let archive_keys = self.archive_keys.clone();
 
         tokio::spawn(async move {
-            let scheduler = Scheduler::new(pool_manager, config);
+            let scheduler = Scheduler::new(pool_manager, config, db, archive_keys);
             if let Err(e) = scheduler.run_block_height_monitor().await {
                 tracing::error!("Block height monitor error: {}", e);
             }
@@ -290,9 +376,11 @@ impl Scheduler {
 
         let pool_manager = self.pool_manager.clone();
         let config = self.config.clone();
+        let db = self.db.clone();
+        let archive_keys = self.archive_keys.clone();
 
         tokio::spawn(async move {
-            let scheduler = Scheduler::new(pool_manager, config);
+            let scheduler = Scheduler::new(pool_manager, config, db, archive_keys);
             if let Err(e) = scheduler.run_rebroadcast_loop().await {
                 tracing::error!("Rebroadcast loop error: {}", e);
             }
@@ -300,9 +388,11 @@ impl Scheduler {
 
         let pool_manager = self.pool_manager.clone();
         let config = self.config.clone();
+        let db = self.db.clone();
+        let archive_keys = self.archive_keys.clone();
 
         tokio::spawn(async move {
-            let scheduler = Scheduler::new(pool_manager, config);
+            let scheduler = Scheduler::new(pool_manager, config, db, archive_keys);
             if let Err(e) = scheduler.run_confirmation_checker().await {
                 tracing::error!("Confirmation checker error: {}", e);
             }
@@ -310,11 +400,25 @@ impl Scheduler {
 
         let pool_manager = self.pool_manager.clone();
         let config = self.config.clone();
+        let db = self.db.clone();
+        let archive_keys = self.archive_keys.clone();
 
         tokio::spawn(async move {
-            let scheduler = Scheduler::new(pool_manager, config);
+            let scheduler = Scheduler::new(pool_manager, config, db, archive_keys);
             if let Err(e) = scheduler.run_price_monitor().await {
                 tracing::error!("Price monitor error: {}", e);
+            }
+        });
+
+        let pool_manager = self.pool_manager.clone();
+        let config = self.config.clone();
+        let db = self.db.clone();
+        let archive_keys = self.archive_keys.clone();
+
+        tokio::spawn(async move {
+            let scheduler = Scheduler::new(pool_manager, config, db, archive_keys);
+            if let Err(e) = scheduler.run_retention_loop().await {
+                tracing::error!("Retention loop error: {}", e);
             }
         });
 

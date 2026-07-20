@@ -832,6 +832,7 @@
             <div class="nav">
                 <button class="nav-btn active" onclick="showPage('dashboard')" data-i18n="nav_dashboard">Dashboard</button>
                 <button class="nav-btn" onclick="showPage('settings')" data-i18n="nav_settings">Settings</button>
+                <button class="nav-btn" onclick="showPage('archive')" data-i18n="tab_archive">Archive</button>
                 <button class="nav-btn nav-btn-guide" onclick="openWizard(true)" title="Guide">?</button>
                 <button class="lang-btn" onclick="setLanguage('en')" id="lang-en">EN</button>
                 <button class="lang-btn" onclick="setLanguage('es')" id="lang-es">ES</button>
@@ -851,6 +852,11 @@
                 <div id="sparrow-readiness-banner" class="protocol-banner" style="display:none; border-color: var(--amber); margin-top: 12px;">
                     <h3 id="sparrow-readiness-title" data-i18n="sparrow_readiness_title">Sparrow setup required</h3>
                     <p id="sparrow-readiness-text"></p>
+                </div>
+                <div id="safe-mode-banner" class="protocol-banner" style="display:none; border-color: var(--red); background: #FF475714; margin-top: 12px;">
+                    <h3 data-i18n="safe_mode_alert" style="color: var(--red);">Tampering detected — broadcasting halted. Review and acknowledge.</h3>
+                    <p id="safe-mode-ids" style="font-family: var(--font-mono); font-size: 12px; word-break: break-all;"></p>
+                    <button class="btn btn-red" style="margin-top: 10px;" onclick="acknowledgeSafeMode()" data-i18n="safe_mode_ack">Acknowledge</button>
                 </div>
                 <div class="stats">
                     <div class="stat-card">
@@ -891,7 +897,7 @@
                     <div class="stat-card">
                         <div class="label" data-i18n="stat_value">Value</div>
                         <div class="value" id="s-value" style="color: var(--text);">0</div>
-                        <div class="sub" data-i18n="stat_value_sub">BTC in pool</div>
+                        <div class="sub" data-i18n="stat_value_sub">sats in pool</div>
                     </div>
                     <div class="stat-card price">
                         <div class="label" data-i18n="stat_btc_price">BTC Price</div>
@@ -1033,6 +1039,53 @@
                     <div class="settings-footer">
                         <button class="btn btn-outline" onclick="loadConfig()" data-i18n="cfg_reset">Reset</button>
                         <button class="btn" style="background: var(--green);" onclick="saveConfig()" data-i18n="cfg_save">Save Settings</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="page-archive" class="page">
+            <div class="container">
+                <div class="section">
+                    <div class="section-header">
+                        <h2>&#128230; <span data-i18n="tab_archive">Archive</span></h2>
+                        <button id="archive-lock-btn" class="btn btn-outline btn-sm" style="display:none;" onclick="archiveLock()" data-i18n="archive_lock">Lock</button>
+                    </div>
+
+                    <div id="archive-setpw-panel" style="display:none;">
+                        <div class="setting-hint" style="color: var(--amber); margin-bottom: 12px;" data-i18n="archive_no_recovery">Warning: this password cannot be recovered. If you lose it, archived data is permanently unreadable.</div>
+                        <div class="import-form">
+                            <input type="password" id="archive-setpw-input" data-i18n-placeholder="archive_pw_placeholder" placeholder="Password" style="flex: 3;">
+                            <button class="btn" onclick="archiveSetPassword()" data-i18n="archive_set_pw" style="flex: 0 0 auto;">Set password</button>
+                        </div>
+                    </div>
+
+                    <div id="archive-unlock-panel" style="display:none;">
+                        <div class="setting-hint" data-i18n="archive_locked_msg" style="margin-bottom: 12px;">The archive is locked. Enter the password to unlock it.</div>
+                        <div class="import-form">
+                            <input type="password" id="archive-unlock-input" data-i18n-placeholder="archive_pw_placeholder" placeholder="Password" style="flex: 3;">
+                            <button class="btn" onclick="archiveUnlock()" data-i18n="archive_unlock" style="flex: 0 0 auto;">Unlock</button>
+                        </div>
+                        <div id="archive-unlock-error" style="display:none; color: var(--red); margin-top: 10px; font-size: 13px;"></div>
+                    </div>
+
+                    <div id="archive-list-panel" style="display:none;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th data-i18n="detail_pool_id">Pool ID</th>
+                                    <th data-i18n="detail_network">Network</th>
+                                    <th data-i18n="archive_col_archived_at">Archived</th>
+                                </tr>
+                            </thead>
+                            <tbody id="archive-list-body">
+                                <tr><td colspan="3" class="empty" data-i18n="archive_empty">No archived transactions.</td></tr>
+                            </tbody>
+                        </table>
+                        <div style="display:flex; gap:8px; margin-top:16px;">
+                            <button id="archive-prev-btn" class="btn btn-outline btn-sm" onclick="archivePrevPage()">&#8592;</button>
+                            <button id="archive-next-btn" class="btn btn-outline btn-sm" onclick="archiveNextPage()">&#8594;</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1259,7 +1312,7 @@
                 stat_mempool_unavailable: 'Bitcoin node not connected',
                 stat_mempool_cong_low: 'Low', stat_mempool_cong_medium: 'Medium', stat_mempool_cong_high: 'High',
                 stat_total: 'Total', stat_total_sub: 'All transactions',
-                stat_value: 'Value', stat_value_sub: 'BTC in pool',
+                stat_value: 'Value', stat_value_sub: 'sats in pool',
                 stat_btc_price: 'BTC Price', stat_btc_price_sub: 'Live spot price',
                 stat_btc_price_stale: 'Cached price',
                 import_title: 'Import Transaction', import_hex: 'Raw transaction hex (02000000...)', import_label: 'Label (optional)', import_fee: 'Target Fee (sat/vB)', import_btn: 'Import', import_schedule_all: 'Schedule All',
@@ -1360,6 +1413,20 @@
                 wizard_finish: 'Get started',
                 wizard_step_of: 'Step {n} of {total}',
                 wizard_show_again: 'Show guide again',
+                tab_archive: 'Archive',
+                safe_mode_alert: 'Tampering detected — broadcasting halted. Review and acknowledge.',
+                safe_mode_ack: 'Acknowledge',
+                archive_set_pw: 'Set password',
+                archive_unlock: 'Unlock',
+                archive_lock: 'Lock',
+                archive_locked_msg: 'The archive is locked. Enter the password to unlock it.',
+                archive_no_recovery: 'Warning: this password cannot be recovered. If you lose it, archived data is permanently unreadable.',
+                archive_empty: 'No archived transactions.',
+                archive_pw_placeholder: 'Password',
+                archive_wrong_pw: 'Incorrect password.',
+                archive_pw_already_set: 'A password is already set for the archive.',
+                archive_generic_error: 'Something went wrong. Please try again.',
+                archive_col_archived_at: 'Archived',
             },
             es: {
                 nav_dashboard: 'Panel', nav_settings: 'Configuraci\u00f3n',
@@ -1382,7 +1449,7 @@
                 stat_mempool_unavailable: 'Nodo Bitcoin no conectado',
                 stat_mempool_cong_low: 'Baja', stat_mempool_cong_medium: 'Media', stat_mempool_cong_high: 'Alta',
                 stat_total: 'Total', stat_total_sub: 'Todas las transacciones',
-                stat_value: 'Valor', stat_value_sub: 'BTC en el pool',
+                stat_value: 'Valor', stat_value_sub: 'sats en el pool',
                 stat_btc_price: 'Precio BTC', stat_btc_price_sub: 'Precio spot en vivo',
                 stat_btc_price_stale: 'Precio en cach\u00e9',
                 import_title: 'Importar Transacci\u00f3n', import_hex: 'Hex de transacci\u00f3n cruda (02000000...)', import_label: 'Etiqueta (opcional)', import_fee: 'Tarifa Objetivo (sat/vB)', import_btn: 'Importar', import_schedule_all: 'Programar Todas',
@@ -1483,6 +1550,20 @@
                 wizard_finish: 'Empezar',
                 wizard_step_of: 'Paso {n} de {total}',
                 wizard_show_again: 'Ver gu\u00eda de nuevo',
+                tab_archive: 'Archivo',
+                safe_mode_alert: 'Manipulaci\u00f3n detectada \u2014 difusi\u00f3n detenida. Revisa y reconoce.',
+                safe_mode_ack: 'Reconocer',
+                archive_set_pw: 'Fijar contrase\u00f1a',
+                archive_unlock: 'Desbloquear',
+                archive_lock: 'Bloquear',
+                archive_locked_msg: 'El archivo est\u00e1 bloqueado. Introduce la contrase\u00f1a para desbloquearlo.',
+                archive_no_recovery: 'Aviso: esta contrase\u00f1a no se puede recuperar. Si la pierdes, los datos archivados quedan ilegibles para siempre.',
+                archive_empty: 'No hay transacciones archivadas.',
+                archive_pw_placeholder: 'Contrase\u00f1a',
+                archive_wrong_pw: 'Contrase\u00f1a incorrecta.',
+                archive_pw_already_set: 'Ya hay una contrase\u00f1a fijada para el archivo.',
+                archive_generic_error: 'Algo fall\u00f3. Int\u00e9ntalo de nuevo.',
+                archive_col_archived_at: 'Archivado',
             }
         };
 
@@ -1582,6 +1663,7 @@
             document.getElementById('page-' + name).classList.add('active');
             event.target.classList.add('active');
             if (name === 'settings') loadConfig();
+            if (name === 'archive') refresh();
         }
 
         function toast(msg) {
@@ -1930,6 +2012,177 @@
             text.textContent = parts.join(' ');
         }
 
+        function updateSafeModeBanner(status) {
+            const el = document.getElementById('safe-mode-banner');
+            const ids = document.getElementById('safe-mode-ids');
+            if (!el || !ids || !status) return;
+            if (!status.safe_mode) {
+                el.style.display = 'none';
+                return;
+            }
+            ids.textContent = (status.tampered_ids || []).join(', ');
+            el.style.display = 'block';
+        }
+
+        async function acknowledgeSafeMode() {
+            try {
+                await fetch('/api/security/acknowledge', { method: 'POST' });
+            } catch (e) { console.error(e); }
+            refresh();
+        }
+
+        // ── Archive tab ──────────────────────────────────────────────
+        const ARCHIVE_LIMIT = 50;
+        let archiveOffset = 0;
+
+        function updateArchiveState(status) {
+            const pwPanel = document.getElementById('archive-setpw-panel');
+            const unlockPanel = document.getElementById('archive-unlock-panel');
+            const listPanel = document.getElementById('archive-list-panel');
+            const lockBtn = document.getElementById('archive-lock-btn');
+            if (!pwPanel || !unlockPanel || !listPanel || !lockBtn || !status) return;
+
+            pwPanel.style.display = 'none';
+            unlockPanel.style.display = 'none';
+            listPanel.style.display = 'none';
+            lockBtn.style.display = 'none';
+
+            if (!status.archive_password_set) {
+                pwPanel.style.display = 'block';
+            } else if (status.archive_locked) {
+                unlockPanel.style.display = 'block';
+            } else {
+                listPanel.style.display = 'block';
+                lockBtn.style.display = 'inline-block';
+                const archivePage = document.getElementById('page-archive');
+                if (archivePage && archivePage.classList.contains('active')) {
+                    loadArchiveList(archiveOffset);
+                }
+            }
+        }
+
+        async function archiveSetPassword() {
+            const input = document.getElementById('archive-setpw-input');
+            const pw = input.value;
+            if (!pw) return;
+            try {
+                const res = await fetch('/api/archive/set-password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pw })
+                });
+                input.value = '';
+                if (res.status === 409) {
+                    toast(t('archive_pw_already_set'));
+                } else if (!res.ok) {
+                    toast(t('archive_generic_error'));
+                }
+            } catch (e) {
+                console.error(e);
+                toast(t('archive_generic_error'));
+            } finally {
+                input.value = '';
+            }
+            refresh();
+        }
+
+        async function archiveUnlock() {
+            const input = document.getElementById('archive-unlock-input');
+            const errEl = document.getElementById('archive-unlock-error');
+            const pw = input.value;
+            if (!pw) return;
+            errEl.style.display = 'none';
+            try {
+                const res = await fetch('/api/archive/unlock', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pw })
+                });
+                input.value = '';
+                if (res.ok) {
+                    const data = await res.json();
+                    if (!data.unlocked) {
+                        errEl.textContent = t('archive_wrong_pw');
+                        errEl.style.display = 'block';
+                    }
+                } else {
+                    errEl.textContent = t('archive_generic_error');
+                    errEl.style.display = 'block';
+                }
+            } catch (e) {
+                console.error(e);
+                errEl.textContent = t('archive_generic_error');
+                errEl.style.display = 'block';
+            } finally {
+                input.value = '';
+            }
+            refresh();
+        }
+
+        async function archiveLock() {
+            try {
+                await fetch('/api/archive/lock', { method: 'POST' });
+            } catch (e) { console.error(e); }
+            archiveOffset = 0;
+            refresh();
+        }
+
+        async function loadArchiveList(offset) {
+            archiveOffset = offset || 0;
+            const body = document.getElementById('archive-list-body');
+            if (!body) return;
+            try {
+                const res = await fetch(`/api/archive?limit=${ARCHIVE_LIMIT}&offset=${archiveOffset}`);
+                if (res.status === 401) {
+                    refresh();
+                    return;
+                }
+                if (!res.ok) return;
+                const items = await res.json();
+                if (!items.length) {
+                    body.innerHTML = `<tr><td colspan="3" class="empty">${t('archive_empty')}</td></tr>`;
+                } else {
+                    body.innerHTML = items.map(it => `
+                        <tr style="cursor:pointer;" onclick="showArchiveDetail('${it.id}')">
+                            <td>${makeCopyable(it.id.substring(0, 8) + '...', it.id)}</td>
+                            <td>${it.network}</td>
+                            <td class="time">${new Date(it.archived_at).toLocaleString('es-ES', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric' })}</td>
+                        </tr>`).join('');
+                }
+                const prevBtn = document.getElementById('archive-prev-btn');
+                const nextBtn = document.getElementById('archive-next-btn');
+                if (prevBtn) prevBtn.disabled = archiveOffset === 0;
+                if (nextBtn) nextBtn.disabled = items.length < ARCHIVE_LIMIT;
+            } catch (e) { console.error(e); }
+        }
+
+        function archivePrevPage() {
+            loadArchiveList(Math.max(0, archiveOffset - ARCHIVE_LIMIT));
+        }
+
+        function archiveNextPage() {
+            loadArchiveList(archiveOffset + ARCHIVE_LIMIT);
+        }
+
+        async function showArchiveDetail(id) {
+            try {
+                const res = await fetch(`/api/archive/${id}`);
+                if (res.status === 401) {
+                    refresh();
+                    return;
+                }
+                if (!res.ok) {
+                    toast(t('archive_generic_error'));
+                    return;
+                }
+                const rec = await res.json();
+                const body = document.getElementById('modal-body');
+                body.innerHTML = `<pre style="white-space: pre-wrap; word-break: break-all; font-family: var(--font-mono); font-size: 12px; line-height: 1.5;">${JSON.stringify(rec, null, 2)}</pre>`;
+                document.getElementById('modal-actions').innerHTML = '';
+                document.getElementById('modal-overlay').classList.add('active');
+            } catch (e) { console.error(e); }
+        }
+
         async function refresh() {
             try {
                 const [statsRes, txsRes, priceRes, mempoolRes, statusRes] = await Promise.all([
@@ -1960,6 +2213,8 @@
                     const status = await statusRes.json();
                     updateIndexerBanner(status);
                     updateSparrowReadinessBanner(status);
+                    updateSafeModeBanner(status);
+                    updateArchiveState(status);
                 }
 
                 document.getElementById('s-pending').textContent = stats.pending;
@@ -1967,7 +2222,8 @@
                 document.getElementById('s-broadcast').textContent = stats.broadcast;
                 document.getElementById('s-confirmed').textContent = stats.confirmed;
                 document.getElementById('s-total').textContent = stats.total_transactions;
-                document.getElementById('s-value').textContent = stats.total_value_btc.toFixed(8);
+                const poolSats = Math.round((stats.total_value_btc || 0) * 1e8);
+                document.getElementById('s-value').textContent = poolSats.toLocaleString();
 
                 const tbody = document.getElementById('tx-list');
                 if (!allTxs.length) {
