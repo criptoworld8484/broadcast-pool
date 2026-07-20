@@ -535,6 +535,19 @@
         }
         .wizard-card.liana ul li::before { color: var(--liana-green); }
         .wizard-card.settings ul li::before { color: var(--green); }
+        .wizard-card ol {
+            list-style: none; counter-reset: step; font-size: 19px;
+            color: var(--text); line-height: 1.7; margin-top: 4px;
+        }
+        .wizard-card ol li { padding: 12px 0 12px 40px; position: relative; counter-increment: step; }
+        .wizard-card ol li::before {
+            content: counter(step); position: absolute; left: 0; top: 12px;
+            width: 26px; height: 26px; border-radius: 50%;
+            background: var(--liana-green); color: #000;
+            font-size: 14px; font-weight: 700;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .wizard-lead-liana { font-size: 18px; color: var(--text); line-height: 1.55; margin-bottom: 6px; }
         .wizard-tip {
             font-size: 17px;
             font-weight: 600;
@@ -1269,12 +1282,13 @@
                     <p class="wizard-lead" data-i18n="wizard_s3_lead">Use the same Electrum port (:50050). Cycle transactions arrive as pending for manual scheduling.</p>
                     <div class="wizard-card liana">
                         <h4 data-i18n="wizard_liana_title">Liana</h4>
-                        <ul>
-                            <li data-i18n="wizard_liana_1">Refresh / cycle TX stays pending. Schedule the broadcast date (e.g. before timelock expiry).</li>
-                            <li data-i18n="wizard_liana_2">Anti-fee-sniping uses a recent block height in nLockTime — scheduling still works.</li>
-                            <li data-i18n="wizard_liana_3">Policy timelock (CSV in miniscript) is not read by Broadcast Pool.</li>
-                        </ul>
-                        <p class="wizard-tip" data-i18n="wizard_liana_tip">Date/time only — no fiat price trigger for Liana.</p>
+                        <p class="wizard-lead-liana" data-i18n="wizard_liana_lead">To send transactions from Liana and schedule UTXO cycling, first:</p>
+                        <ol>
+                            <li data-i18n="wizard_liana_1">In Settings, choose the transaction type to send: enable the "Schedule Liana UTXO cycling" toggle.</li>
+                            <li data-i18n="wizard_liana_2">In the "Virtual block Height" field, enter the block height that will be passed to Liana and where the cycling transaction will be broadcast. It must be earlier than the height at which the UTXO expires and the recovery path becomes spendable.</li>
+                            <li data-i18n="wizard_liana_3">Then go to Liana and refresh/cycle the UTXOs, sending the transaction, so your next cycle can run unattended.</li>
+                            <li data-i18n="wizard_liana_4">You will now see the Liana transaction on the main dashboard, waiting to be broadcast at the configured block without any intervention.</li>
+                        </ol>
                     </div>
                 </div>
                 <div class="wizard-step" data-wizard-step="3">
@@ -1422,10 +1436,11 @@
                 wizard_sparrow_tip: 'Fiat price trigger only when nLockTime is disabled (0).',
                 wizard_s3_lead: 'Use the same Electrum port (:50050). Cycle transactions arrive as pending for manual scheduling.',
                 wizard_liana_title: 'Liana',
-                wizard_liana_1: 'Refresh / cycle TX stays pending. Schedule the broadcast date (e.g. before timelock expiry).',
-                wizard_liana_2: 'Anti-fee-sniping uses a recent block height in nLockTime \u2014 scheduling still works.',
-                wizard_liana_3: 'Policy timelock (CSV in miniscript) is not read by Broadcast Pool.',
-                wizard_liana_tip: 'Date/time only \u2014 no fiat price trigger for Liana.',
+                wizard_liana_lead: 'To send transactions from Liana and schedule UTXO cycling, first:',
+                wizard_liana_1: 'In Settings, choose the transaction type to send: enable the "Schedule Liana UTXO cycling" toggle.',
+                wizard_liana_2: 'In the "Virtual block Height" field, enter the block height that will be passed to Liana and where the cycling transaction will be broadcast. It must be earlier than the height at which the UTXO expires and the recovery path becomes spendable.',
+                wizard_liana_3: 'Then go to Liana and refresh/cycle the UTXOs, sending the transaction, so your next cycle can run unattended.',
+                wizard_liana_4: 'You will now see the Liana transaction on the main dashboard, waiting to be broadcast at the configured block without any intervention.',
                 wizard_s4_lead: 'Global settings apply to transactions with a real locktime in the TX itself (not manual pending ones).',
                 wizard_settings_title: 'Settings',
                 wizard_settings_1: 'Broadcast mode: Immediate, Scheduled, or By block height.',
@@ -1564,10 +1579,11 @@
                 wizard_sparrow_tip: 'Trigger de precio fiat solo si nLockTime est\u00e1 desactivado (0).',
                 wizard_s3_lead: 'Mismo puerto Electrum (:50050). Las TX de ciclo llegan pendientes para programar manualmente.',
                 wizard_liana_title: 'Liana',
-                wizard_liana_1: 'TX de refresh/ciclo queda pendiente. Programa la fecha de emisi\u00f3n (p. ej. antes del vencimiento del timelock).',
-                wizard_liana_2: 'Anti-fee-sniping pone altura reciente en nLockTime \u2014 puedes programar igualmente.',
-                wizard_liana_3: 'El timelock de pol\u00edtica (CSV en miniscript) no lo lee Broadcast Pool.',
-                wizard_liana_tip: 'Solo fecha/hora \u2014 sin trigger de precio fiat en Liana.',
+                wizard_liana_lead: 'Para enviar transacciones desde Liana y poder programar los ciclados de los UTXOs, primero:',
+                wizard_liana_1: 'En Settings, selecciona el tipo de tx a mandar: activa el slide "Schedule Liana UTXO cycling".',
+                wizard_liana_2: 'Indica en el campo "Virtual block Height" la altura de bloque que se le pasar\u00e1 a Liana y que ser\u00e1 donde se haga el broadcast de la transacci\u00f3n de ciclado. Esta altura deber\u00e1 ser anterior a la altura de bloque en la que expira el UTXO y toma efecto el recovery path.',
+                wizard_liana_3: 'Despu\u00e9s de esto, ve a Liana y haz el refresco/ciclado de los UTXOs, realizando el env\u00edo, de forma que puedas desatender tu pr\u00f3ximo ciclado.',
+                wizard_liana_4: 'En este momento ver\u00e1s en el dashboard principal la tx de Liana, esperando para distribuirse en el bloque configurado sin tu intervenci\u00f3n.',
                 wizard_s4_lead: 'La configuraci\u00f3n global aplica a TX con locktime real en la transacci\u00f3n (no a las manuales pendientes).',
                 wizard_settings_title: 'Configuraci\u00f3n',
                 wizard_settings_1: 'Modo de transmisi\u00f3n: Inmediato, Programado o Por altura de bloque.',
