@@ -2843,7 +2843,6 @@
                 if (res.ok) {
                     toast(t('toast_saved'));
                     const cfg = await res.json();
-                    applyIndexerConfig(cfg);
                     updateWalletUrls(cfg);
                     await checkIndexerStatus();
                     if (cfg.network_changed && cfg.network_editable) {
