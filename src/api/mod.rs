@@ -47,6 +47,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/archive/unlock", post(archive_unlock))
         .route("/api/archive/lock", post(archive_lock))
         .route("/api/archive", get(list_archive))
+        .route("/api/archive/flush", post(archive_flush))
         .route("/api/archive/{id}", get(get_archive_item))
         .with_state(state)
 }
@@ -940,6 +941,39 @@ async fn get_archive_item(
     Ok(Json(value).into_response())
 }
 
+/// Manually flush terminal (confirmed/failed/broadcast) transactions to the encrypted
+/// archive right now, without waiting for the automatic retention window. Requires the
+/// archive to be unlocked. The automatic 30-day retention still runs independently.
+async fn archive_flush(
+    State(state): State<AppState>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    let Some(key) = state.archive_keys.key() else {
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "locked": true })),
+        )
+            .into_response());
+    };
+
+    let network = state
+        .config
+        .lock()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .network
+        .network_type
+        .data_dir_name()
+        .to_string();
+
+    // cutoff = now → every terminal row (updated_at strictly in the past) is archived.
+    let now = chrono::Utc::now().to_rfc3339();
+    let archived = state
+        .db
+        .archive_terminal_older_than(&key, &network, &now)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "archived": archived })).into_response())
+}
+
 async fn restart_daemon() -> impl IntoResponse {
     let handle = tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -1054,6 +1088,56 @@ mod tests {
 
         let _ = archive_lock(State(state.clone())).await;
         assert!(!state.archive_keys.is_unlocked());
+    }
+
+    #[tokio::test]
+    async fn archive_flush_requires_unlock_then_archives_terminal() {
+        let (state, _dir) = test_state();
+
+        // Locked → 401.
+        let resp = archive_flush(State(state.clone())).await.expect("ok").into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Set password + unlock.
+        let _ = archive_set_password(
+            State(state.clone()),
+            Json(ArchivePasswordRequest { password: "pw".to_string() }),
+        )
+        .await
+        .expect("set-password");
+        let _ = archive_unlock(
+            State(state.clone()),
+            Json(ArchivePasswordRequest { password: "pw".to_string() }),
+        )
+        .await
+        .expect("unlock");
+
+        // Insert a terminal (confirmed) tx on the configured network.
+        let network = state
+            .config
+            .lock()
+            .unwrap()
+            .network
+            .network_type
+            .data_dir_name()
+            .to_string();
+        let new_tx = crate::db::models::NewBroadcastTx {
+            tx_hex: "00".to_string(), network: network.clone(), nlocktime: None,
+            broadcast_mode: Some("scheduled".to_string()), scheduled_time: None,
+            target_fee_rate: None, source_label: None, destination_address: None,
+            utxo_count: Some(1), total_value_btc: None, replacement_of: None,
+        };
+        let stored = state.db.insert_broadcast_tx(&new_tx).expect("insert");
+        state
+            .db
+            .update_tx_status(&stored.id, crate::db::models::TxStatus::Confirmed, None)
+            .expect("confirm");
+
+        // Manual flush now → the terminal tx moves to the archive immediately.
+        let resp = archive_flush(State(state.clone())).await.expect("ok").into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.db.get_broadcast_tx_by_id(&stored.id).is_err(), "gone from active pool");
+        assert_eq!(state.db.list_archive(&network, 10, 0).expect("list").len(), 1);
     }
 
     #[test]
