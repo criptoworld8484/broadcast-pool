@@ -1157,6 +1157,15 @@ impl Database {
         let mut count = 0usize;
 
         for tx in txs {
+            if tx.tampered == Some(true) {
+                // row_mac mismatch: don't silently re-encrypt and delete evidence of
+                // tampering from the pool. Leave it in place for the admin to handle.
+                tracing::warn!(
+                    "Retention: skipping tampered row {} (row_mac mismatch), leaving in pool",
+                    tx.id
+                );
+                continue;
+            }
             let json = serde_json::to_vec(&tx).context("Failed to serialize tx for archive")?;
             let archive_id = Uuid::new_v4().to_string();
             let blob = crate::crypto::seal(key, &json, archive_id.as_bytes());
@@ -1590,6 +1599,61 @@ mod tests {
         // Blob does not contain plaintext.
         let blob = db.get_archive_blob(&list[0].id).unwrap().unwrap();
         assert!(!String::from_utf8_lossy(&blob).contains("testnet4-plaintext-marker"));
+    }
+
+    // A row whose row_mac no longer matches (raw SQL tampering, bypassing the app layer) must
+    // NOT be archived+deleted by retention: that would silently erase the evidence of tampering
+    // from the pool. Such rows must be skipped and left in place.
+    #[test]
+    fn retention_skips_tampered_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("rt.db")).unwrap();
+        let archive_key = crate::crypto::generate_key();
+        let stored = db
+            .insert_broadcast_tx(&crate::db::models::NewBroadcastTx {
+                tx_hex: tx_hex_with_output_sats(&[10_000]),
+                network: "testnet4".into(),
+                nlocktime: None,
+                broadcast_mode: Some("scheduled".into()),
+                scheduled_time: Some(chrono::Utc::now()),
+                target_fee_rate: None,
+                source_label: None,
+                destination_address: None,
+                utxo_count: Some(1),
+                total_value_btc: None,
+                replacement_of: None,
+            })
+            .unwrap();
+        db.update_tx_status(&stored.id, TxStatus::Confirmed, None).unwrap();
+        db.lock_conn()
+            .unwrap()
+            .execute(
+                "UPDATE broadcast_pool SET updated_at='2000-01-01T00:00:00Z' WHERE id=?1",
+                params![stored.id],
+            )
+            .unwrap();
+        // Directly tamper a MAC-covered column via raw SQL, bypassing the app layer.
+        db.lock_conn()
+            .unwrap()
+            .execute(
+                "UPDATE broadcast_pool SET scheduled_time='1999-01-01T00:00:00Z' WHERE id=?1",
+                params![stored.id],
+            )
+            .unwrap();
+        assert_eq!(
+            db.get_broadcast_tx_by_id(&stored.id).unwrap().tampered,
+            Some(true)
+        );
+
+        let moved = db
+            .archive_terminal_older_than(&archive_key, "testnet4", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(moved, 0, "tampered row must not be counted as archived");
+        // Still present in the active pool.
+        assert!(db.get_broadcast_tx_by_id(&stored.id).is_ok());
+        // Archive stays empty.
+        let list = db.list_archive("testnet4", 10, 0).unwrap();
+        assert_eq!(list.len(), 0);
     }
 }
 

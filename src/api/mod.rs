@@ -880,7 +880,10 @@ async fn list_archive(
     State(state): State<AppState>,
     Query(q): Query<ArchiveListQuery>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    if !state.archive_keys.is_unlocked() {
+    // Use key() rather than is_unlocked() here: listing the archive is a genuine
+    // archive operation and should count as activity that slides the auto-lock TTL,
+    // unlike passive status polling.
+    if state.archive_keys.key().is_none() {
         return Ok((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "locked": true })),

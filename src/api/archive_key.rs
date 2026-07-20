@@ -105,8 +105,23 @@ impl ArchiveKeyStore {
         *guard = None;
     }
 
+    /// Non-sliding peek: reports whether a key is currently cached and unexpired,
+    /// WITHOUT renewing the TTL. Used by passive checks (e.g. `/api/status` polling)
+    /// so that merely observing lock state doesn't keep the archive unlocked forever.
+    /// If the cached key has expired, it is cleared as a side effect.
     pub fn is_unlocked(&self) -> bool {
-        self.key().is_some()
+        let mut guard = self.cached.lock().unwrap();
+        match guard.as_ref() {
+            Some(cached) => {
+                if Instant::now() >= cached.expires_at {
+                    *guard = None;
+                    false
+                } else {
+                    true
+                }
+            }
+            None => false,
+        }
     }
 }
 
@@ -156,5 +171,34 @@ mod tests {
         }
         assert!(store.key().is_none());
         assert!(!store.is_unlocked());
+    }
+
+    #[test]
+    fn is_unlocked_does_not_slide_ttl_but_key_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(&dir.path().join("k.db")).unwrap());
+        let store = ArchiveKeyStore::new();
+        store.set_password(&db, "hunter2").unwrap();
+        assert!(store.unlock(&db, "hunter2").unwrap());
+
+        let initial_expires_at = store.cached.lock().unwrap().as_ref().unwrap().expires_at;
+
+        // Passive peeks must NOT renew expires_at.
+        for _ in 0..5 {
+            assert!(store.is_unlocked());
+        }
+        let after_peeks = store.cached.lock().unwrap().as_ref().unwrap().expires_at;
+        assert_eq!(
+            initial_expires_at, after_peeks,
+            "is_unlocked() must not slide the TTL"
+        );
+
+        // A genuine access via key() must renew expires_at.
+        assert!(store.key().is_some());
+        let after_key = store.cached.lock().unwrap().as_ref().unwrap().expires_at;
+        assert!(
+            after_key > after_peeks,
+            "key() must slide the TTL forward"
+        );
     }
 }
