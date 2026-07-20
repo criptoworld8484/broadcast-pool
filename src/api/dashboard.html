@@ -772,6 +772,23 @@
 
         .setting-hint { font-size: 14px; color: var(--text-dim); margin-top: 8px; }
 
+        /* Archive tab: centered lock-screen style auth card + list action bar */
+        .archive-auth { max-width: 460px; margin: 10px auto 6px; padding: 34px 28px; text-align: center; }
+        .archive-auth .archive-icon { font-size: 42px; margin-bottom: 14px; line-height: 1; }
+        .archive-auth h3 { font-size: 18px; font-weight: 600; margin-bottom: 10px; }
+        .archive-auth .setting-hint { text-align: center; margin: 0 auto 18px; max-width: 400px; line-height: 1.5; }
+        .archive-auth input {
+            width: 100%; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border);
+            color: var(--text); padding: 14px 18px; border-radius: 12px; font-family: var(--font-mono);
+            font-size: 16px; margin-bottom: 12px; text-align: center; transition: border-color 0.2s;
+        }
+        .archive-auth input:focus { outline: none; border-color: var(--btc); box-shadow: 0 0 0 3px var(--btc-dim); }
+        .archive-auth input::placeholder { color: var(--text-dim); }
+        .archive-auth .btn { width: 100%; }
+        .archive-auth .archive-error { color: var(--red); margin-top: 12px; font-size: 13px; }
+        .archive-list-actions { padding: 20px 28px 4px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .archive-list-actions .hint { color: var(--text-dim); font-size: 12.5px; margin: 0; flex: 1; min-width: 200px; }
+
         /* ── Datetime picker styling ─────────────────── */
         input[type="datetime-local"]::-webkit-calendar-picker-indicator {
             filter: invert(0.7);
@@ -1053,23 +1070,31 @@
                     </div>
 
                     <div id="archive-setpw-panel" style="display:none;">
-                        <div class="setting-hint" style="color: var(--amber); margin-bottom: 12px;" data-i18n="archive_no_recovery">Warning: this password cannot be recovered. If you lose it, archived data is permanently unreadable.</div>
-                        <div class="import-form">
-                            <input type="password" id="archive-setpw-input" data-i18n-placeholder="archive_pw_placeholder" placeholder="Password" style="flex: 3;">
-                            <button class="btn" onclick="archiveSetPassword()" data-i18n="archive_set_pw" style="flex: 0 0 auto;">Set password</button>
+                        <div class="archive-auth">
+                            <div class="archive-icon">&#128273;</div>
+                            <h3 data-i18n="archive_setpw_title">Set an archive password</h3>
+                            <div class="setting-hint" style="color: var(--amber);" data-i18n="archive_no_recovery">Warning: this password cannot be recovered. If you lose it, archived data is permanently unreadable.</div>
+                            <input type="password" id="archive-setpw-input" data-i18n-placeholder="archive_pw_placeholder" placeholder="Password" onkeydown="if(event.key==='Enter')archiveSetPassword()">
+                            <button class="btn" onclick="archiveSetPassword()" data-i18n="archive_set_pw">Set password</button>
                         </div>
                     </div>
 
                     <div id="archive-unlock-panel" style="display:none;">
-                        <div class="setting-hint" data-i18n="archive_locked_msg" style="margin-bottom: 12px;">The archive is locked. Enter the password to unlock it.</div>
-                        <div class="import-form">
-                            <input type="password" id="archive-unlock-input" data-i18n-placeholder="archive_pw_placeholder" placeholder="Password" style="flex: 3;">
-                            <button class="btn" onclick="archiveUnlock()" data-i18n="archive_unlock" style="flex: 0 0 auto;">Unlock</button>
+                        <div class="archive-auth">
+                            <div class="archive-icon">&#128274;</div>
+                            <h3 data-i18n="archive_unlock_title">Archive locked</h3>
+                            <div class="setting-hint" data-i18n="archive_locked_msg">The archive is locked. Enter the password to unlock it.</div>
+                            <input type="password" id="archive-unlock-input" data-i18n-placeholder="archive_pw_placeholder" placeholder="Password" onkeydown="if(event.key==='Enter')archiveUnlock()">
+                            <button class="btn" onclick="archiveUnlock()" data-i18n="archive_unlock">Unlock</button>
+                            <div id="archive-unlock-error" class="archive-error" style="display:none;"></div>
                         </div>
-                        <div id="archive-unlock-error" style="display:none; color: var(--red); margin-top: 10px; font-size: 13px;"></div>
                     </div>
 
                     <div id="archive-list-panel" style="display:none;">
+                        <div class="archive-list-actions">
+                            <button id="archive-flush-btn" class="btn btn-sm" onclick="archiveFlush()" data-i18n="archive_flush">Archive now</button>
+                            <span class="hint" data-i18n="archive_flush_hint">Moves finished transactions to the encrypted archive now. This also happens automatically after 30 days.</span>
+                        </div>
                         <table>
                             <thead>
                                 <tr>
@@ -1423,6 +1448,11 @@
                 archive_no_recovery: 'Warning: this password cannot be recovered. If you lose it, archived data is permanently unreadable.',
                 archive_empty: 'No archived transactions.',
                 archive_pw_placeholder: 'Password',
+                archive_setpw_title: 'Set an archive password',
+                archive_unlock_title: 'Archive locked',
+                archive_flush: 'Archive now',
+                archive_flush_hint: 'Moves finished transactions (confirmed, broadcast or failed) to the encrypted archive now. This also happens automatically after 30 days.',
+                archive_flush_result: '{n} transaction(s) archived.',
                 archive_wrong_pw: 'Incorrect password.',
                 archive_pw_already_set: 'A password is already set for the archive.',
                 archive_generic_error: 'Something went wrong. Please try again.',
@@ -1560,6 +1590,11 @@
                 archive_no_recovery: 'Aviso: esta contrase\u00f1a no se puede recuperar. Si la pierdes, los datos archivados quedan ilegibles para siempre.',
                 archive_empty: 'No hay transacciones archivadas.',
                 archive_pw_placeholder: 'Contrase\u00f1a',
+                archive_setpw_title: 'Fija una contrase\u00f1a de archivo',
+                archive_unlock_title: 'Archivo bloqueado',
+                archive_flush: 'Archivar ahora',
+                archive_flush_hint: 'Vuelca ahora al archivo cifrado las transacciones terminadas (confirmadas, difundidas o fallidas). Tambi\u00e9n ocurre autom\u00e1ticamente a los 30 d\u00edas.',
+                archive_flush_result: '{n} transacci\u00f3n(es) archivada(s).',
                 archive_wrong_pw: 'Contrase\u00f1a incorrecta.',
                 archive_pw_already_set: 'Ya hay una contrase\u00f1a fijada para el archivo.',
                 archive_generic_error: 'Algo fall\u00f3. Int\u00e9ntalo de nuevo.',
@@ -2125,6 +2160,26 @@
             } catch (e) { console.error(e); }
             archiveOffset = 0;
             refresh();
+        }
+
+        async function archiveFlush() {
+            const btn = document.getElementById('archive-flush-btn');
+            if (btn) btn.disabled = true;
+            try {
+                const res = await fetch('/api/archive/flush', { method: 'POST' });
+                if (res.status === 401) { refresh(); return; }
+                if (!res.ok) { toast(t('archive_generic_error')); return; }
+                const data = await res.json();
+                const n = data.archived || 0;
+                toast(t('archive_flush_result').replace('{n}', n));
+                archiveOffset = 0;
+                loadArchiveList(0);
+            } catch (e) {
+                console.error(e);
+                toast(t('archive_generic_error'));
+            } finally {
+                if (btn) btn.disabled = false;
+            }
         }
 
         async function loadArchiveList(offset) {
