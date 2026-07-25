@@ -850,6 +850,18 @@
             .wizard-lead { font-size: 19px; }
             .wizard-card ul { font-size: 17px; }
         }
+        .app-footer {
+            text-align: center;
+            padding: 28px 20px 34px;
+            margin-top: 8px;
+            font-family: var(--font-mono);
+            font-size: 12.5px;
+            color: var(--text-dim);
+            opacity: 0.7;
+            border-top: 1px solid var(--border);
+            letter-spacing: 0.02em;
+        }
+        .app-footer .sep { margin: 0 8px; opacity: 0.5; }
     </style>
 </head>
 <body>
@@ -1318,6 +1330,14 @@
             </div>
         </div>
     </div>
+
+    <footer class="app-footer">
+        <span>criptoworld8484</span>
+        <span class="sep">·</span>
+        <span id="footer-year">2026</span>
+        <span class="sep">·</span>
+        <span>v<span id="footer-version">—</span></span>
+    </footer>
 
     <script>
         let allTxs = [];
@@ -2063,6 +2083,13 @@
             text.textContent = parts.join(' ');
         }
 
+        function updateFooter(status) {
+            const yearEl = document.getElementById('footer-year');
+            if (yearEl) yearEl.textContent = new Date().getFullYear();
+            const verEl = document.getElementById('footer-version');
+            if (verEl && status && status.app_version) verEl.textContent = status.app_version;
+        }
+
         function updateSafeModeBanner(status) {
             const el = document.getElementById('safe-mode-banner');
             const ids = document.getElementById('safe-mode-ids');
@@ -2286,6 +2313,7 @@
                     updateSparrowReadinessBanner(status);
                     updateSafeModeBanner(status);
                     updateArchiveState(status);
+                    updateFooter(status);
                 }
 
                 document.getElementById('s-pending').textContent = stats.pending;
@@ -2918,6 +2946,7 @@
             }
         }
 
+        updateFooter(null);
         refresh();
         loadConfig();
         checkIndexerStatus();
