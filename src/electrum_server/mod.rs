@@ -2260,6 +2260,7 @@ fn resolve_ingest_plan(
     source_label: &str,
     nlocktime: u32,
     config: &Config,
+    chain_height: Option<u64>,
 ) -> (BroadcastMode, Option<chrono::DateTime<chrono::Utc>>) {
     if source_label == "liana" {
         let vb = &config.schedule.liana_virtual_block;
@@ -2292,8 +2293,22 @@ fn resolve_ingest_plan(
         );
         return (BroadcastMode::Scheduled, scheduled);
     }
-    // Block-height nLockTime — no indexer RPC at ingest; scheduler waits for chain height.
+    // Block-height nLockTime. A height already at/below the current tip is Sparrow's
+    // anti-fee-sniping stamp on an otherwise-immediate tx: it is already final, so honor the
+    // immediate intent and broadcast on arrival. A height still in the future is a genuine
+    // timelock → by_block (the scheduler waits for the chain to reach it). If the tip is
+    // unknown, stay conservative and treat it as by_block.
     if nlocktime > 0 && nlocktime < 500_000_000 {
+        if let Some(tip) = chain_height {
+            if (nlocktime as u64) <= tip {
+                tracing::info!(
+                    "Block-height nLockTime {} already satisfied (tip {}) → immediate",
+                    nlocktime,
+                    tip
+                );
+                return (BroadcastMode::Immediate, Some(chrono::Utc::now()));
+            }
+        }
         tracing::info!(
             "Block-height nLockTime {} → by_block mode",
             nlocktime
@@ -2379,9 +2394,12 @@ fn handle_broadcast(
         cfg.network.network_type.data_dir_name().to_string()
     };
 
+    // Cached tip (no RPC) lets ingest tell an already-final anti-fee-sniping nLockTime from a
+    // genuine future block lock. Read it before taking the config lock (separate lock).
+    let chain_height = pool_manager.chain_health().height;
     let (broadcast_mode, scheduled_time) = {
         let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
-        resolve_ingest_plan(source_label, nlocktime, &cfg)
+        resolve_ingest_plan(source_label, nlocktime, &cfg, chain_height)
     };
 
     // Armed Liana virtual-block capture: Liana signs nLockTime=0, so the schedule target is the
@@ -2649,9 +2667,35 @@ mod tests {
             "#,
         )
         .expect("test config");
-        let (mode, sched) = resolve_ingest_plan("sparrow", 1_750_000_000, &cfg);
+        let (mode, sched) = resolve_ingest_plan("sparrow", 1_750_000_000, &cfg, None);
         assert_eq!(mode, BroadcastMode::Scheduled);
         assert!(sched.is_some());
+    }
+
+    // Sparrow's anti-fee-sniping stamps a block-height nLockTime at/below the current tip on an
+    // otherwise-immediate tx. Such a tx is already final, so it must ingest as immediate (broadcast
+    // on arrival), not by_block — that was the reported mislabeling.
+    #[test]
+    fn satisfied_block_height_nlocktime_is_immediate() {
+        let cfg = Config::default_config();
+        // nLockTime == tip → already satisfied → immediate.
+        let (mode, sched) = resolve_ingest_plan("sparrow", 145_695, &cfg, Some(145_695));
+        assert_eq!(mode, BroadcastMode::Immediate);
+        assert!(sched.is_some());
+        // nLockTime below tip → also immediate.
+        let (mode2, _) = resolve_ingest_plan("sparrow", 145_600, &cfg, Some(145_695));
+        assert_eq!(mode2, BroadcastMode::Immediate);
+    }
+
+    // A block-height nLockTime still in the future is a genuine timelock → by_block; an unknown
+    // tip stays conservative (by_block).
+    #[test]
+    fn future_block_height_nlocktime_stays_by_block() {
+        let cfg = Config::default_config();
+        let (mode, _) = resolve_ingest_plan("sparrow", 200_000, &cfg, Some(145_695));
+        assert_eq!(mode, BroadcastMode::ByBlock);
+        let (mode2, _) = resolve_ingest_plan("sparrow", 200_000, &cfg, None);
+        assert_eq!(mode2, BroadcastMode::ByBlock);
     }
 
     #[test]
@@ -2671,7 +2715,7 @@ mod tests {
             "#,
         )
         .expect("test config");
-        let (mode, _) = resolve_ingest_plan("sparrow", 900_000, &cfg);
+        let (mode, _) = resolve_ingest_plan("sparrow", 900_000, &cfg, None);
         assert_eq!(mode, BroadcastMode::ByBlock);
     }
 
@@ -2682,7 +2726,7 @@ mod tests {
         cfg.schedule.liana_virtual_block.target_height = 950430;
 
         // Liana tx with a by-height nLockTime, armed → by_block.
-        let (mode, sched) = resolve_ingest_plan("liana", 950430, &cfg);
+        let (mode, sched) = resolve_ingest_plan("liana", 950430, &cfg, None);
         assert_eq!(mode, BroadcastMode::ByBlock);
         assert!(sched.is_none());
     }
@@ -2690,7 +2734,7 @@ mod tests {
     #[test]
     fn disarmed_liana_height_locktime_stays_manual() {
         let cfg = Config::default_config(); // liana_virtual_block disarmed by default
-        let (mode, _) = resolve_ingest_plan("liana", 950430, &cfg);
+        let (mode, _) = resolve_ingest_plan("liana", 950430, &cfg, None);
         assert_eq!(mode, BroadcastMode::Manual);
     }
 
@@ -2703,7 +2747,7 @@ mod tests {
         cfg.schedule.liana_virtual_block.enabled = true;
         cfg.schedule.liana_virtual_block.target_height = 950430;
 
-        let (mode, sched) = resolve_ingest_plan("liana", 0, &cfg);
+        let (mode, sched) = resolve_ingest_plan("liana", 0, &cfg, None);
         assert_eq!(mode, BroadcastMode::ByBlock);
         assert!(sched.is_none());
     }
@@ -2711,7 +2755,7 @@ mod tests {
     #[test]
     fn disarmed_liana_zero_locktime_stays_manual() {
         let cfg = Config::default_config();
-        let (mode, _) = resolve_ingest_plan("liana", 0, &cfg);
+        let (mode, _) = resolve_ingest_plan("liana", 0, &cfg, None);
         assert_eq!(mode, BroadcastMode::Manual);
     }
 
