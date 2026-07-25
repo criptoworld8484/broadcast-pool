@@ -456,6 +456,7 @@ struct StatusResponse {
     /// Ids of the tampered rows that triggered safe mode, for the dashboard banner.
     tampered_ids: Vec<String>,
     /// True when the archive encryption key is not currently cached in memory.
+    app_version: String,
     archive_locked: bool,
     /// True once an archive password has been configured (salt+verifier persisted).
     archive_password_set: bool,
@@ -743,6 +744,7 @@ async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse
         liana_vb_disarm_height,
         safe_mode: state.pool_manager.is_safe_mode(),
         tampered_ids: state.pool_manager.tampered_ids(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
         archive_locked: !state.archive_keys.is_unlocked(),
         archive_password_set: state.archive_keys.password_is_set(&state.db).unwrap_or(false),
     }))
