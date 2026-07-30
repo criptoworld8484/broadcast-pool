@@ -320,6 +320,10 @@ pub struct NostrNotificationConfig {
     pub tor_socks: String,
 }
 
+/// Set by the platform wrapper when it knows where the Tor SOCKS proxy is but the binary
+/// cannot guess (StartOS: the Tor container IP is dynamic).
+pub const TOR_SOCKS_ENV: &str = "BROADCAST_POOL_TOR_SOCKS";
+
 /// Umbrel's bundled Tor daemon. Reachable from any app container on the umbrel network.
 pub const UMBREL_TOR_SOCKS: &str = "10.21.21.11:9050";
 /// A Tor daemon running on the same host (non-containerised installs).
@@ -332,12 +336,36 @@ impl NostrNotificationConfig {
     /// sensible default on this platform. An explicit value always wins over detection so a
     /// user with a proxy elsewhere is never overridden.
     pub fn resolved_tor_socks(&self, umbrel: bool) -> Option<String> {
+        let from_env = std::env::var(TOR_SOCKS_ENV).ok();
+        self.resolve_tor_socks_with(umbrel, from_env.as_deref())
+    }
+
+    /// Precedence: explicit setting > platform-supplied env var > platform default > none.
+    ///
+    /// The env var is how a platform whose proxy address we cannot guess supplies it — on
+    /// StartOS the Tor container IP is dynamic and only the service wrapper knows it, so it
+    /// passes it in rather than the binary learning anything about StartOS. Same contract as
+    /// `BROADCAST_POOL_RPC_URL` / `BROADCAST_POOL_INDEXER_URL`.
+    ///
+    /// Takes the env value as an argument so it is testable without mutating process state.
+    pub(crate) fn resolve_tor_socks_with(
+        &self,
+        umbrel: bool,
+        env_socks: Option<&str>,
+    ) -> Option<String> {
         let configured = self.tor_socks.trim();
+        // An explicit "off" wins over everything, including a platform that supplies a proxy.
         if configured.eq_ignore_ascii_case("off") {
             return None;
         }
         if !configured.is_empty() {
             return Some(configured.to_string());
+        }
+        if let Some(env_socks) = env_socks.map(str::trim).filter(|s| !s.is_empty()) {
+            if env_socks.eq_ignore_ascii_case("off") {
+                return None;
+            }
+            return Some(env_socks.to_string());
         }
         // Only auto-detect where we know a proxy exists. Guessing 127.0.0.1:9050 on a
         // platform without Tor would turn every .onion send into a confusing timeout.
@@ -647,6 +675,49 @@ mod tests {
         );
         // Off Umbrel we don't guess: a wrong guess turns every .onion send into a timeout.
         assert_eq!(cfg.resolved_tor_socks(false), None);
+    }
+
+    #[test]
+    fn platform_env_supplies_the_proxy_when_detection_cannot() {
+        // StartOS case: not Umbrel, so nothing to auto-detect, but the wrapper passes the
+        // Tor container IP in.
+        let cfg = crate::config::NostrNotificationConfig::default();
+        assert_eq!(
+            cfg.resolve_tor_socks_with(false, Some("10.0.5.7:9050")).as_deref(),
+            Some("10.0.5.7:9050")
+        );
+        // Blank or absent env falls through to the platform default.
+        assert_eq!(cfg.resolve_tor_socks_with(false, Some("  ")), None);
+        assert_eq!(cfg.resolve_tor_socks_with(false, None), None);
+        assert_eq!(
+            cfg.resolve_tor_socks_with(true, Some("   ")).as_deref(),
+            Some(crate::config::UMBREL_TOR_SOCKS)
+        );
+    }
+
+    #[test]
+    fn the_env_var_beats_the_umbrel_default_but_loses_to_the_setting() {
+        let mut cfg = crate::config::NostrNotificationConfig::default();
+        // Env over platform default.
+        assert_eq!(
+            cfg.resolve_tor_socks_with(true, Some("10.0.5.7:9050")).as_deref(),
+            Some("10.0.5.7:9050")
+        );
+        // The user's explicit setting still wins over the platform.
+        cfg.tor_socks = "192.168.1.5:9150".to_string();
+        assert_eq!(
+            cfg.resolve_tor_socks_with(true, Some("10.0.5.7:9050")).as_deref(),
+            Some("192.168.1.5:9150")
+        );
+        // ...including turning Tor off entirely.
+        cfg.tor_socks = "off".to_string();
+        assert_eq!(cfg.resolve_tor_socks_with(true, Some("10.0.5.7:9050")), None);
+    }
+
+    #[test]
+    fn a_platform_can_disable_tor_through_the_env_var() {
+        let cfg = crate::config::NostrNotificationConfig::default();
+        assert_eq!(cfg.resolve_tor_socks_with(true, Some("off")), None);
     }
 
     #[test]
