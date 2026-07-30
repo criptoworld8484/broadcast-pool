@@ -110,6 +110,15 @@ export BROADCAST_POOL_WEB_PORT="${BROADCAST_POOL_WEB_PORT:-8080}"
 # Platform hint: the dashboard can't auto-detect a LAN IP here (the container only sees
 # the StartOS overlay), so it directs the user to the service's Interfaces page instead.
 export BROADCAST_POOL_PLATFORM="startos"
+# Tor SOCKS for .onion Nostr relays. main.ts injects this from the Tor package's container IP
+# (dynamic, hence not hardcodable); left unset when Tor is not installed, in which case the
+# app connects directly and only complains if a .onion relay is actually configured.
+if [ -n "${BROADCAST_POOL_TOR_SOCKS:-}" ]; then
+    export BROADCAST_POOL_TOR_SOCKS
+    log "Tor SOCKS proxy for .onion relays: ${BROADCAST_POOL_TOR_SOCKS}"
+else
+    log "Tor not available; .onion Nostr relays will not be reachable"
+fi
 # Deliberately NOT set: BROADCAST_POOL_NETWORK (auto-detected), BROADCAST_POOL_UMBREL.
 
 log "Starting broadcast-pool (network auto-detected from Bitcoin Core)"

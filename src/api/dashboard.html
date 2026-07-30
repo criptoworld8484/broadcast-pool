@@ -1077,6 +1077,54 @@
                             </div>
                             <div class="setting-hint" data-i18n="cfg_scheduled_hint">If set, overrides delay. Leave empty to use delay hours</div>
                         </div>
+                        <div class="setting-group" style="grid-column: 1 / -1;">
+                            <label data-i18n="cfg_notif_title">Broadcast Notifications</label>
+                            <div style="background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px;">
+                                <label class="switch">
+                                    <input type="checkbox" id="cfg-notif-enabled" onchange="toggleNotifications()">
+                                    <span class="switch-track"></span>
+                                    <span class="switch-label" data-i18n="cfg_notif_enable">Notify me when a waiting transaction is broadcast</span>
+                                </label>
+                                <div class="setting-hint" data-i18n="cfg_notif_hint">Sends a private message the moment a retained transaction is redistributed to the network. Never affects broadcasting.</div>
+
+                                <div id="cfg-notif-fields" style="display:none; margin-top:18px;">
+                                    <label data-i18n="cfg_notif_language">Message language</label>
+                                    <select id="cfg-notif-language" style="width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:14px 18px; border-radius:12px; font-family:var(--font-mono); font-size:15px;">
+                                        <option value="en">English</option>
+                                        <option value="es">Español</option>
+                                    </select>
+
+                                    <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
+                                        <label class="switch">
+                                            <input type="checkbox" id="cfg-nostr-enabled" onchange="toggleNotifications()">
+                                            <span class="switch-track"></span>
+                                            <span class="switch-label" data-i18n="cfg_notif_nostr">Nostr (encrypted DM)</span>
+                                        </label>
+                                        <div class="setting-hint" data-i18n="cfg_notif_nostr_hint">End-to-end encrypted (NIP-17). The relay only ever sees an opaque blob.</div>
+                                        <div id="cfg-nostr-fields" style="display:none; margin-top:14px;">
+                                            <label data-i18n="cfg_notif_npub">Your npub (where the DM is sent)</label>
+                                            <input type="text" id="cfg-nostr-npub" placeholder="npub1..." style="width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:14px 18px; border-radius:12px; font-family:var(--font-mono); font-size:14px;">
+                                            <label style="margin-top:14px;" data-i18n="cfg_notif_relays">Relays (one per line)</label>
+                                            <textarea id="cfg-nostr-relays" rows="3" placeholder="wss://relay.example.com" style="width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:14px 18px; border-radius:12px; font-family:var(--font-mono); font-size:14px; resize:vertical;"></textarea>
+                                            <div class="setting-hint" data-i18n="cfg_notif_relays_hint">Your own relay keeps this fully private. The node must be able to reach it. A .onion relay is routed over Tor.</div>
+                                            <label style="margin-top:14px;" data-i18n="cfg_notif_tor">Tor SOCKS proxy (for .onion relays)</label>
+                                            <input type="text" id="cfg-nostr-tor-socks" placeholder="10.21.21.11:9050" style="width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); padding:14px 18px; border-radius:12px; font-family:var(--font-mono); font-size:14px;">
+                                            <div class="setting-hint" id="cfg-nostr-tor-hint" data-i18n="cfg_notif_tor_hint">Leave empty to auto-detect. Type "off" to never use Tor. Only .onion relays go through it.</div>
+                                            <div id="cfg-nostr-app-npub-row" style="display:none; margin-top:14px;">
+                                                <label data-i18n="cfg_notif_app_npub">This app sends from</label>
+                                                <div id="cfg-nostr-app-npub" onclick="copyWalletUrl('cfg-nostr-app-npub')" title="Click to copy" style="font-family:var(--font-mono); font-size:13px; color:var(--btc); padding:10px 14px; background:var(--bg-card); border-radius:8px; border:1px solid var(--border); cursor:pointer; word-break:break-all;">-</div>
+                                                <div class="setting-hint" data-i18n="cfg_notif_app_npub_hint">Add this npub to your client's allowed senders if it filters DMs.</div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
+                                        <button type="button" class="btn btn-outline btn-sm" onclick="testNotification()" data-i18n="cfg_notif_test">Send test notification</button>
+                                        <div class="setting-hint" id="cfg-notif-test-result" data-i18n="cfg_notif_test_hint">Save your settings first, then send a test.</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                     <div class="settings-footer">
                         <button class="btn btn-outline" onclick="loadConfig()" data-i18n="cfg_reset">Reset</button>
@@ -1397,6 +1445,25 @@
                 cfg_liana_vb_approx: 'approx.',
                 cfg_scheduled_datetime: 'Scheduled Date & Time (optional)',
                 cfg_scheduled_hint: 'If set, overrides delay. Leave empty to use random delay hours',
+                cfg_notif_title: 'Broadcast Notifications',
+                cfg_notif_enable: 'Notify me when a waiting transaction is broadcast',
+                cfg_notif_hint: 'Sends a private message the moment a retained transaction is redistributed to the network. Never affects broadcasting.',
+                cfg_notif_language: 'Message language',
+                cfg_notif_nostr: 'Nostr (encrypted DM)',
+                cfg_notif_nostr_hint: 'End-to-end encrypted (NIP-17). The relay only ever sees an opaque blob.',
+                cfg_notif_npub: 'Your npub (where the DM is sent)',
+                cfg_notif_relays: 'Relays (one per line)',
+                cfg_notif_relays_hint: 'Your own relay keeps this fully private. The node must be able to reach it. A .onion relay is routed over Tor.',
+                cfg_notif_tor: 'Tor SOCKS proxy (for .onion relays)',
+                cfg_notif_tor_hint: 'Leave empty to auto-detect. Type "off" to never use Tor. Only .onion relays go through it.',
+                cfg_notif_tor_active: 'Using {addr} for .onion relays. Clearnet and LAN relays stay direct.',
+                cfg_notif_app_npub: 'This app sends from',
+                cfg_notif_app_npub_hint: "Add this npub to your client's allowed senders if it filters DMs.",
+                cfg_notif_test: 'Send test notification',
+                cfg_notif_test_hint: 'Save your settings first, then send a test.',
+                cfg_notif_test_sending: 'Sending...',
+                cfg_notif_test_ok: 'delivered',
+                cfg_notif_test_none: 'No channel enabled.',
                 cfg_clear: 'Clear',
                 protocol_banner_title: 'Virtual Mempool Active',
                 protocol_banner_text: 'Transactions from your wallet are retained locally and shown as pending. Broadcast happens when the scheduler triggers (time, block, price, or immediate).',
@@ -1540,6 +1607,25 @@
                 cfg_liana_vb_approx: 'aprox.',
                 cfg_scheduled_datetime: 'Fecha y Hora Programada (opcional)',
                 cfg_scheduled_hint: 'Si se define, anula el retraso. Dejar vac\u00edo para usar horas aleatorias',
+                cfg_notif_title: 'Avisos de difusi\u00f3n',
+                cfg_notif_enable: 'Av\u00edsame cuando se difunda una transacci\u00f3n en espera',
+                cfg_notif_hint: 'Env\u00eda un mensaje privado en el momento en que una transacci\u00f3n retenida se redistribuye a la red. Nunca afecta a la difusi\u00f3n.',
+                cfg_notif_language: 'Idioma del mensaje',
+                cfg_notif_nostr: 'Nostr (DM cifrado)',
+                cfg_notif_nostr_hint: 'Cifrado extremo a extremo (NIP-17). El relay solo ve un blob opaco.',
+                cfg_notif_npub: 'Tu npub (destino del DM)',
+                cfg_notif_relays: 'Relays (uno por l\u00ednea)',
+                cfg_notif_relays_hint: 'Tu propio relay lo mantiene totalmente privado. El nodo debe poder alcanzarlo. Un relay .onion se enruta por Tor.',
+                cfg_notif_tor: 'Proxy SOCKS de Tor (para relays .onion)',
+                cfg_notif_tor_hint: 'Déjalo vacío para autodetectar. Escribe "off" para no usar Tor nunca. Solo pasan por él los relays .onion.',
+                cfg_notif_tor_active: 'Usando {addr} para relays .onion. Los relays de clearnet y LAN van directos.',
+                cfg_notif_app_npub: 'Esta app env\u00eda desde',
+                cfg_notif_app_npub_hint: 'A\u00f1ade este npub a los remitentes permitidos de tu cliente si filtra los DM.',
+                cfg_notif_test: 'Enviar aviso de prueba',
+                cfg_notif_test_hint: 'Guarda la configuraci\u00f3n primero y luego env\u00eda una prueba.',
+                cfg_notif_test_sending: 'Enviando...',
+                cfg_notif_test_ok: 'entregado',
+                cfg_notif_test_none: 'Ning\u00fan canal activado.',
                 cfg_clear: 'Limpiar',
                 protocol_banner_title: 'Mempool Virtual Activo',
                 protocol_banner_text: 'Las transacciones de tu wallet se retienen localmente y aparecen como pendientes. La transmisi\u00f3n ocurre cuando el scheduler lo dispara (tiempo, bloque, precio o inmediato).',
@@ -2788,8 +2874,64 @@
                 document.getElementById('cfg-min-delay').value = cfg.min_delay_hours;
                 document.getElementById('cfg-max-delay').value = cfg.max_delay_hours;
                 toggleScheduledFields();
+                loadNotificationConfig(cfg);
                 updateWalletUrls(cfg);
             } catch (e) { console.error(e); }
+        }
+
+        function loadNotificationConfig(cfg) {
+            document.getElementById('cfg-notif-enabled').checked = !!cfg.notifications_enabled;
+            document.getElementById('cfg-notif-language').value = cfg.notifications_language || 'en';
+            document.getElementById('cfg-nostr-enabled').checked = !!cfg.nostr_enabled;
+            document.getElementById('cfg-nostr-npub').value = cfg.nostr_recipient_npub || '';
+            document.getElementById('cfg-nostr-relays').value = (cfg.nostr_relays || []).join('\n');
+            document.getElementById('cfg-nostr-tor-socks').value = cfg.nostr_tor_socks || '';
+            // Show what will actually be used, since an empty field means auto-detect.
+            const torHint = document.getElementById('cfg-nostr-tor-hint');
+            torHint.textContent = cfg.nostr_tor_socks_effective
+                ? t('cfg_notif_tor_active').replace('{addr}', cfg.nostr_tor_socks_effective)
+                : t('cfg_notif_tor_hint');
+
+            // The app's own npub only exists once Nostr has been enabled and saved once.
+            const appNpubRow = document.getElementById('cfg-nostr-app-npub-row');
+            if (cfg.nostr_app_npub) {
+                document.getElementById('cfg-nostr-app-npub').textContent = cfg.nostr_app_npub;
+                appNpubRow.style.display = '';
+            } else {
+                appNpubRow.style.display = 'none';
+            }
+            toggleNotifications();
+        }
+
+        function toggleNotifications() {
+            const on = document.getElementById('cfg-notif-enabled').checked;
+            document.getElementById('cfg-notif-fields').style.display = on ? '' : 'none';
+            document.getElementById('cfg-nostr-fields').style.display =
+                on && document.getElementById('cfg-nostr-enabled').checked ? '' : 'none';
+        }
+
+        async function testNotification() {
+            const out = document.getElementById('cfg-notif-test-result');
+            out.style.color = 'var(--text-dim)';
+            out.textContent = t('cfg_notif_test_sending');
+            try {
+                const res = await fetch('/api/notifications/test', { method: 'POST' });
+                if (!res.ok) {
+                    out.style.color = 'var(--red)';
+                    out.textContent = await res.text();
+                    return;
+                }
+                const data = await res.json();
+                // Report per channel: one working channel shouldn't hide another that failed.
+                const parts = Object.entries(data.channels || {}).map(([name, r]) =>
+                    r.ok ? `${name}: ${t('cfg_notif_test_ok')}` : `${name}: ${r.error}`
+                );
+                out.style.color = data.ok ? 'var(--green)' : 'var(--red)';
+                out.textContent = parts.join(' · ') || t('cfg_notif_test_none');
+            } catch (e) {
+                out.style.color = 'var(--red)';
+                out.textContent = String(e);
+            }
         }
 
         async function checkIndexerStatus() {
@@ -2878,6 +3020,13 @@
                     scheduled_datetime: document.getElementById('cfg-scheduled-datetime').value || null,
                     min_delay_hours: parseInt(document.getElementById('cfg-min-delay').value),
                     max_delay_hours: parseInt(document.getElementById('cfg-max-delay').value),
+                    notifications_enabled: document.getElementById('cfg-notif-enabled').checked,
+                    notifications_language: document.getElementById('cfg-notif-language').value,
+                    nostr_enabled: document.getElementById('cfg-nostr-enabled').checked,
+                    nostr_recipient_npub: document.getElementById('cfg-nostr-npub').value.trim(),
+                    nostr_relays: document.getElementById('cfg-nostr-relays').value
+                        .split('\n').map(r => r.trim()).filter(r => r),
+                    nostr_tor_socks: document.getElementById('cfg-nostr-tor-socks').value.trim(),
                 };
                 const res = await fetch('/api/config', {
                     method: 'POST',
@@ -2887,6 +3036,9 @@
                 if (res.ok) {
                     toast(t('toast_saved'));
                     const cfg = await res.json();
+                    // Re-read: enabling Nostr mints the app identity server-side, so the npub
+                    // only comes back in this response.
+                    loadNotificationConfig(cfg);
                     updateWalletUrls(cfg);
                     await checkIndexerStatus();
                     if (cfg.network_changed && cfg.network_editable) {

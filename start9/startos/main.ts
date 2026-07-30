@@ -28,10 +28,20 @@ export const main = sdk.setupMain(async ({ effects }) => {
     'broadcast-pool',
   )
 
+  // Tor SOCKS proxy for .onion Nostr relays (notifications). Tor is an optional package on
+  // StartOS and its container IP is dynamic, so `.const()` restarts us when it changes —
+  // same approach as bitcoin-core-startos' `-onion=` flag. When Tor is not installed this is
+  // empty and the app simply connects directly; a user who then configures a .onion relay
+  // gets an explicit "no Tor proxy available" message rather than a silent timeout.
+  const torIp = await sdk.getContainerIp(effects, { packageId: 'tor' }).const()
+
   return sdk.Daemons.of(effects)
     .addDaemon('broadcast-pool', {
       subcontainer: container,
-      exec: { command: ['/entrypoint.sh'] },
+      exec: {
+        command: ['/entrypoint.sh'],
+        env: torIp ? { BROADCAST_POOL_TOR_SOCKS: `${torIp}:9050` } : {},
+      },
       ready: {
         display: i18n('Electrum (TCP)'),
         fn: async () => {

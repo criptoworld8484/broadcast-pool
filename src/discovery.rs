@@ -1167,6 +1167,10 @@ pub fn save_config_to_disk(config: &Config, key: &[u8; 32]) -> anyhow::Result<()
     if let Some(ref mut rpc) = to_write.bitcoin_rpc {
         rpc.password = crate::config::encrypt_rpc_password(key, &rpc.password);
     }
+    to_write.notifications.nostr.app_nsec = crate::config::encrypt_nostr_nsec(
+        key,
+        &to_write.notifications.nostr.app_nsec,
+    );
     let toml_str = toml::to_string_pretty(&to_write)?;
     std::fs::write(&config_path, toml_str)?;
     tracing::info!("Config saved to {:?}", config_path);

@@ -67,6 +67,10 @@ rand = "0.8"
 hex = "0.4"
 socket2 = "0.5"
 
+# Nostr notifications (NIP-17 gift-wrapped DMs). nip44+nip59 only — not all-nips, to keep
+# the binary (and the Umbrel image / .s9pk) from growing more than necessary.
+nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
+
 # Encryption at rest
 chacha20poly1305 = "0.10"
 argon2 = { version = "0.5", features = ["password-hash"] }
