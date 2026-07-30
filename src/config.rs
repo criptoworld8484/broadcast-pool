@@ -16,6 +16,8 @@ pub struct Config {
     pub web: WebConfig,
     #[serde(default)]
     pub electrum_server: ElectrumServerConfig,
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -246,12 +248,127 @@ impl Config {
                     .ok()
                     .filter(|s| !s.trim().is_empty()),
             },
+            notifications: NotificationsConfig::default(),
         }
     }
 
     pub fn db_path(&self, data_dir: &Path) -> PathBuf {
         data_dir.join(format!("broadcast-pool-{}.db", self.network.network_type.data_dir_name()))
     }
+}
+
+/// Tell the user, over a private channel, when a waiting tx is redistributed to the network.
+/// Off by default; delivery is fire-and-forget and never affects broadcasting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationsConfig {
+    /// Master switch. When false, no channel is contacted regardless of its own `enabled`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Message language: `en` (default) or `es`.
+    #[serde(default = "default_notification_language")]
+    pub language: String,
+    #[serde(default)]
+    pub nostr: NostrNotificationConfig,
+}
+
+fn default_notification_language() -> String {
+    "en".to_string()
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            language: default_notification_language(),
+            nostr: NostrNotificationConfig::default(),
+        }
+    }
+}
+
+impl NotificationsConfig {
+    pub fn nostr_active(&self) -> bool {
+        self.enabled
+            && self.nostr.enabled
+            && !self.nostr.recipient_npub.trim().is_empty()
+            && self.nostr.relays.iter().any(|r| !r.trim().is_empty())
+    }
+
+    pub fn any_active(&self) -> bool {
+        self.nostr_active()
+    }
+}
+
+/// Encrypted DM (NIP-17 gift wrap) to the user's own npub, via the user's own relay(s).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NostrNotificationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Where the DM is sent — the user's npub.
+    #[serde(default)]
+    pub recipient_npub: String,
+    /// Relay websocket URLs, e.g. `wss://relay.example.com`.
+    #[serde(default)]
+    pub relays: Vec<String>,
+    /// The app's own sending identity. Generated on first activation and persisted
+    /// encrypted (`enc:v1:`) with the keyfile — never exposed through the API.
+    #[serde(default)]
+    pub app_nsec: String,
+    /// SOCKS5 proxy (`host:port`) used to reach `.onion` relays. Only `.onion` URLs go
+    /// through it; clearnet and LAN relays stay direct. Empty = resolve a platform default
+    /// (Umbrel ships a Tor proxy); `"off"` disables Tor routing entirely.
+    #[serde(default)]
+    pub tor_socks: String,
+}
+
+/// Umbrel's bundled Tor daemon. Reachable from any app container on the umbrel network.
+pub const UMBREL_TOR_SOCKS: &str = "10.21.21.11:9050";
+/// A Tor daemon running on the same host (non-containerised installs).
+pub const LOCAL_TOR_SOCKS: &str = "127.0.0.1:9050";
+
+impl NostrNotificationConfig {
+    /// Resolve the SOCKS proxy to use for `.onion` relays.
+    ///
+    /// `None` means "connect directly" — either the user turned Tor off, or there is no
+    /// sensible default on this platform. An explicit value always wins over detection so a
+    /// user with a proxy elsewhere is never overridden.
+    pub fn resolved_tor_socks(&self, umbrel: bool) -> Option<String> {
+        let configured = self.tor_socks.trim();
+        if configured.eq_ignore_ascii_case("off") {
+            return None;
+        }
+        if !configured.is_empty() {
+            return Some(configured.to_string());
+        }
+        // Only auto-detect where we know a proxy exists. Guessing 127.0.0.1:9050 on a
+        // platform without Tor would turn every .onion send into a confusing timeout.
+        if umbrel {
+            return Some(UMBREL_TOR_SOCKS.to_string());
+        }
+        None
+    }
+
+    /// True when any configured relay is a Tor hidden service, i.e. a proxy is required.
+    pub fn has_onion_relay(&self) -> bool {
+        self.relays
+            .iter()
+            .any(|r| r.trim().trim_end_matches('/').to_ascii_lowercase().ends_with(".onion"))
+    }
+}
+
+/// Encrypt the app's Nostr secret key for persistence. Idempotent, same contract as
+/// `encrypt_rpc_password` but with its own AAD so the two fields aren't interchangeable.
+pub fn encrypt_nostr_nsec(key: &[u8; 32], nsec: &str) -> String {
+    if nsec.is_empty() || crate::crypto::is_encoded(nsec) {
+        return nsec.to_string();
+    }
+    crate::crypto::encode_field(key, nsec, b"notifications.nostr.nsec")
+}
+
+/// Decrypt the app's Nostr secret key loaded from disk. A value that fails to decrypt
+/// (e.g. written under a different keyfile) is returned as-is.
+pub fn decrypt_nostr_nsec(key: &[u8; 32], stored: &str) -> String {
+    crate::crypto::decode_field(key, stored, b"notifications.nostr.nsec")
+        .unwrap_or_else(|_| stored.to_string())
 }
 
 /// Encrypt `bitcoin_rpc.password` for persistence to disk. Idempotent: an empty password or
@@ -469,6 +586,144 @@ mod tests {
         assert_eq!(crate::config::decrypt_rpc_password(&key, &enc), "s3cret");
         // Legacy plaintext passes through.
         assert_eq!(crate::config::decrypt_rpc_password(&key, "plain"), "plain");
+    }
+
+    #[test]
+    fn nostr_nsec_encrypt_decrypt_roundtrip_and_idempotence() {
+        let key = crate::crypto::generate_key();
+        // Generated, never a literal: a hardcoded nsec would trip secret scanners.
+        let nsec = crate::notify::nostr::generate_nsec().unwrap();
+        let enc = crate::config::encrypt_nostr_nsec(&key, &nsec);
+        assert!(enc.starts_with("enc:v1:"));
+        assert_eq!(crate::config::decrypt_nostr_nsec(&key, &enc), nsec);
+        // Re-encrypting an already-encrypted value must not double-wrap it (save_config_to_disk
+        // runs on every save, including saves of an unchanged config).
+        assert_eq!(crate::config::encrypt_nostr_nsec(&key, &enc), enc);
+        // Empty stays empty — no key is stored until Nostr is enabled.
+        assert_eq!(crate::config::encrypt_nostr_nsec(&key, ""), "");
+    }
+
+    #[test]
+    fn nsec_and_rpc_password_ciphertexts_are_not_interchangeable() {
+        // Distinct AAD: a value encrypted as one field must not decrypt as the other.
+        let key = crate::crypto::generate_key();
+        let enc_nsec = crate::config::encrypt_nostr_nsec(&key, "a-secret-value");
+        // Failed decryption falls back to returning the stored value untouched.
+        assert_eq!(crate::config::decrypt_rpc_password(&key, &enc_nsec), enc_nsec);
+    }
+
+    #[test]
+    fn notifications_are_inert_until_fully_configured() {
+        let mut cfg = crate::config::NotificationsConfig::default();
+        assert!(!cfg.any_active());
+
+        // Channel enabled but master switch off -> still inert.
+        cfg.nostr.enabled = true;
+        cfg.nostr.recipient_npub = "npub1test".to_string();
+        cfg.nostr.relays = vec!["ws://192.168.50.68:7777".to_string()];
+        assert!(!cfg.any_active());
+
+        cfg.enabled = true;
+        assert!(cfg.any_active());
+
+        // Nostr needs a recipient AND at least one non-blank relay.
+        cfg.nostr.recipient_npub = String::new();
+        cfg.nostr.relays = Vec::new();
+        assert!(!cfg.nostr_active());
+        cfg.nostr.recipient_npub = "npub1test".to_string();
+        assert!(!cfg.nostr_active());
+        cfg.nostr.relays = vec!["   ".to_string()];
+        assert!(!cfg.nostr_active());
+        cfg.nostr.relays = vec!["ws://192.168.50.68:7777".to_string()];
+        assert!(cfg.nostr_active());
+    }
+
+    #[test]
+    fn tor_socks_defaults_to_umbrel_proxy_only_on_umbrel() {
+        let cfg = crate::config::NostrNotificationConfig::default();
+        assert_eq!(
+            cfg.resolved_tor_socks(true).as_deref(),
+            Some(crate::config::UMBREL_TOR_SOCKS)
+        );
+        // Off Umbrel we don't guess: a wrong guess turns every .onion send into a timeout.
+        assert_eq!(cfg.resolved_tor_socks(false), None);
+    }
+
+    #[test]
+    fn explicit_tor_socks_overrides_detection() {
+        let mut cfg = crate::config::NostrNotificationConfig::default();
+        cfg.tor_socks = " 192.168.1.5:9150 ".to_string();
+        assert_eq!(cfg.resolved_tor_socks(true).as_deref(), Some("192.168.1.5:9150"));
+        assert_eq!(cfg.resolved_tor_socks(false).as_deref(), Some("192.168.1.5:9150"));
+    }
+
+    #[test]
+    fn tor_can_be_turned_off_explicitly_even_on_umbrel() {
+        let mut cfg = crate::config::NostrNotificationConfig::default();
+        cfg.tor_socks = "OFF".to_string();
+        assert_eq!(cfg.resolved_tor_socks(true), None);
+    }
+
+    #[test]
+    fn onion_relays_are_recognised() {
+        let mut cfg = crate::config::NostrNotificationConfig::default();
+        assert!(!cfg.has_onion_relay());
+        cfg.relays = vec!["wss://relay.damus.io".to_string()];
+        assert!(!cfg.has_onion_relay());
+        cfg.relays = vec!["ws://192.168.50.68:7777".to_string()];
+        assert!(!cfg.has_onion_relay());
+        // Trailing slash and case must not defeat the check.
+        cfg.relays = vec!["ws://ABCDEF234567.ONION/".to_string()];
+        assert!(cfg.has_onion_relay());
+        // Mixed list: one onion is enough to need the proxy.
+        cfg.relays = vec![
+            "wss://relay.damus.io".to_string(),
+            "ws://abcdef234567.onion".to_string(),
+        ];
+        assert!(cfg.has_onion_relay());
+    }
+
+    #[test]
+    fn notifications_default_to_english_and_disabled() {
+        let cfg = crate::config::NotificationsConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.language, "en");
+    }
+
+    #[test]
+    fn config_without_a_notifications_section_still_parses() {
+        // Existing installs have no [notifications] block; loading must not fail.
+        let toml_str = r#"
+[network]
+type = "testnet4"
+
+[pool]
+max_size_kb = 300
+rebroadcast_interval_minutes = 30
+expiry_days = 30
+
+[privacy]
+use_tor = false
+tor_socks_port = 9050
+rotate_identity_per_tx = true
+"#;
+        let cfg: crate::config::Config = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.notifications.enabled);
+        assert_eq!(cfg.notifications.language, "en");
+    }
+
+    #[test]
+    fn notifications_section_survives_a_toml_roundtrip() {
+        let mut cfg = crate::config::Config::default_config();
+        cfg.notifications.enabled = true;
+        cfg.notifications.language = "es".to_string();
+        cfg.notifications.nostr.enabled = true;
+        cfg.notifications.nostr.recipient_npub = "npub1abc".to_string();
+        cfg.notifications.nostr.relays = vec!["ws://192.168.50.68:7777".to_string()];
+
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let back: crate::config::Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.notifications, cfg.notifications);
     }
 
     // The signet/testnet4 constants were previously wrong (signet had 65 chars; testnet4

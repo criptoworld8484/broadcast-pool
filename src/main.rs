@@ -5,6 +5,7 @@ mod db;
 mod discovery;
 mod electrum_server;
 mod migration;
+mod notify;
 mod pool;
 mod price;
 mod rpc;
@@ -356,18 +357,28 @@ async fn main() -> Result<()> {
             .bitcoin_rpc
             .as_ref()
             .is_some_and(|rpc| !rpc.password.is_empty());
-    if rpc_pass_needs_decrypt {
+    // The app's Nostr identity is stored encrypted with the same keyfile.
+    let nsec_needs_decrypt = !config.notifications.nostr.app_nsec.is_empty();
+    if rpc_pass_needs_decrypt || nsec_needs_decrypt {
         let provisional_data_dir = get_data_dir(&config)?;
         std::fs::create_dir_all(&provisional_data_dir)?;
         let key_path = provisional_data_dir.join("pool.key");
         match db::keyfile::load_or_create(&key_path) {
             Ok(key) => {
-                if let Some(rpc) = config.bitcoin_rpc.as_mut() {
-                    rpc.password = config::decrypt_rpc_password(&key, &rpc.password);
+                if rpc_pass_needs_decrypt {
+                    if let Some(rpc) = config.bitcoin_rpc.as_mut() {
+                        rpc.password = config::decrypt_rpc_password(&key, &rpc.password);
+                    }
+                }
+                if nsec_needs_decrypt {
+                    config.notifications.nostr.app_nsec = config::decrypt_nostr_nsec(
+                        &key,
+                        &config.notifications.nostr.app_nsec,
+                    );
                 }
             }
             Err(e) => {
-                tracing::warn!("Could not load keyfile to decrypt RPC password: {}", e);
+                tracing::warn!("Could not load keyfile to decrypt config secrets: {}", e);
             }
         }
     }
