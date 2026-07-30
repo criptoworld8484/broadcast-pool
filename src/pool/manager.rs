@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::config::Config;
 use crate::db::models::*;
 use crate::db::Database;
+use crate::notify::BroadcastNotification;
 use crate::pool::chain_health::{decide_chain_source, ChainHealth, ChainSource};
 use crate::price::PriceFeed;
 use crate::rpc::BitcoinRpc;
@@ -55,6 +56,10 @@ pub struct PoolManager {
     price_feed: PriceFeed,
     /// Broadcast channel for scripthash state changes (virtual mempool add/remove).
     scripthash_notifications: tokio::sync::broadcast::Sender<ScripthashNotification>,
+    /// Broadcast channel for user-facing "your tx was redistributed" events. Drained by
+    /// `run_notification_dispatcher`; a full or unsubscribed channel is silently ignored so
+    /// notification delivery can never affect broadcasting.
+    broadcast_notifications: tokio::sync::broadcast::Sender<BroadcastNotification>,
     /// Global broadcast halt. Set when a row_mac mismatch (tampered row) is detected; cleared only
     /// by an explicit admin acknowledgement via `/api/security/acknowledge`.
     safe_mode: Arc<AtomicBool>,
@@ -76,6 +81,7 @@ impl PoolManager {
         config: Arc<Mutex<Config>>,
     ) -> Self {
         let (scripthash_notifications, _) = tokio::sync::broadcast::channel(256);
+        let (broadcast_notifications, _) = tokio::sync::broadcast::channel(256);
         Self {
             db,
             rpc,
@@ -88,6 +94,7 @@ impl PoolManager {
             health_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             price_feed: PriceFeed::new(),
             scripthash_notifications,
+            broadcast_notifications,
             safe_mode: Arc::new(AtomicBool::new(false)),
             tampered_ids: Arc::new(Mutex::new(Vec::new())),
         }
@@ -127,6 +134,13 @@ impl PoolManager {
     /// Subscribe to scripthash state change notifications.
     pub fn subscribe_scripthash_changes(&self) -> tokio::sync::broadcast::Receiver<ScripthashNotification> {
         self.scripthash_notifications.subscribe()
+    }
+
+    /// Subscribe to "a waiting tx was redistributed" events (notification dispatcher).
+    pub fn subscribe_broadcast_notifications(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<BroadcastNotification> {
+        self.broadcast_notifications.subscribe()
     }
 
     pub fn cache_chain_tip(&self, height: u64, hex: String) {
@@ -541,6 +555,16 @@ impl PoolManager {
                     let fee_rate = tx.target_fee_rate.unwrap_or(0.0);
                     self.mark_broadcast(&tx.id, &txid, fee_rate)?;
                     tracing::info!("Successfully broadcast {} (txid: {})", tx.id, txid);
+                    // Fire-and-forget: this runs in a blocking context, so only a non-blocking
+                    // send. Err just means nobody is subscribed (notifications disabled).
+                    let _ = self.broadcast_notifications.send(BroadcastNotification {
+                        txid: txid.clone(),
+                        amount_sats: crate::notify::btc_to_sats(tx.total_value_btc),
+                        source_label: tx.source_label.clone(),
+                        created_at: Some(tx.created_at),
+                        broadcast_at: Utc::now(),
+                        network: tx.network.clone(),
+                    });
                     results.push((tx.id, Ok(txid)));
                 }
                 Err(e) => {

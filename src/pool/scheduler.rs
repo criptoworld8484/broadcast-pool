@@ -337,6 +337,44 @@ impl Scheduler {
         }
     }
 
+    /// Drains the broadcast-notification channel and delivers each event to the enabled
+    /// enabled channel. Runs entirely outside the broadcast path: a slow or unreachable relay
+    /// can only delay other notifications, never a broadcast.
+    pub async fn run_notification_dispatcher(&self) -> Result<()> {
+        let mut rx = self.pool_manager.subscribe_broadcast_notifications();
+        tracing::info!("Starting notification dispatcher");
+
+        loop {
+            match rx.recv().await {
+                Ok(notification) => {
+                    let cfg = {
+                        match self.config.lock() {
+                            Ok(config) => config.notifications.clone(),
+                            Err(e) => {
+                                tracing::error!("Config lock in notification dispatcher: {}", e);
+                                continue;
+                            }
+                        }
+                    };
+                    if !cfg.any_active() {
+                        continue;
+                    }
+                    crate::notify::deliver(&cfg, &notification).await;
+                }
+                // Slow dispatcher (e.g. a long relay timeout) while broadcasts pile up. The
+                // broadcasts themselves are unaffected; we just lost the notifications.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Notification dispatcher lagged, dropped {} event(s)", n);
+                }
+                // The PoolManager is gone — the process is shutting down.
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!("Notification channel closed, dispatcher stopping");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     pub async fn start_all_loops(&self) -> Result<()> {
         let pool_manager = self.pool_manager.clone();
         let config = self.config.clone();
@@ -419,6 +457,18 @@ impl Scheduler {
             let scheduler = Scheduler::new(pool_manager, config, db, archive_keys);
             if let Err(e) = scheduler.run_retention_loop().await {
                 tracing::error!("Retention loop error: {}", e);
+            }
+        });
+
+        let pool_manager = self.pool_manager.clone();
+        let config = self.config.clone();
+        let db = self.db.clone();
+        let archive_keys = self.archive_keys.clone();
+
+        tokio::spawn(async move {
+            let scheduler = Scheduler::new(pool_manager, config, db, archive_keys);
+            if let Err(e) = scheduler.run_notification_dispatcher().await {
+                tracing::error!("Notification dispatcher error: {}", e);
             }
         });
 
