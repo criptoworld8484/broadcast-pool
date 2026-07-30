@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/security/acknowledge", post(security_acknowledge))
         .route("/api/config", get(get_config))
         .route("/api/config", post(save_config))
+        .route("/api/notifications/test", post(test_notification))
         .route("/api/restart", post(restart_daemon))
         .route("/api/estimate-fee", post(estimate_fee))
         .route("/api/indexer-debug", get(get_indexer_debug))
@@ -149,6 +150,23 @@ fn config_to_response(config: &Config, network_changed: bool) -> ConfigResponse 
         indexer_auto_detected: !pinned && !is_manual,
         network_changed,
         supported_networks: supported_networks_vec(),
+        notifications_enabled: config.notifications.enabled,
+        notifications_language: config.notifications.language.clone(),
+        nostr_enabled: config.notifications.nostr.enabled,
+        nostr_recipient_npub: config.notifications.nostr.recipient_npub.clone(),
+        nostr_relays: config.notifications.nostr.relays.clone(),
+        nostr_app_npub: if config.notifications.nostr.app_nsec.is_empty() {
+            String::new()
+        } else {
+            crate::notify::nostr::npub_from_nsec(&config.notifications.nostr.app_nsec)
+                .unwrap_or_default()
+        },
+        nostr_tor_socks: config.notifications.nostr.tor_socks.clone(),
+        nostr_tor_socks_effective: config
+            .notifications
+            .nostr
+            .resolved_tor_socks(crate::discovery::is_umbrel_mode())
+            .unwrap_or_default(),
     }
 }
 
@@ -462,6 +480,68 @@ struct StatusResponse {
     archive_password_set: bool,
 }
 
+/// Send a sample notification through every enabled channel so the user can verify their
+/// relay settings without waiting for a real broadcast. Single attempt and
+/// errors are reported back verbatim — unlike the dispatcher, here the user wants to see them.
+async fn test_notification(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let cfg = {
+        let config = state
+            .config
+            .lock()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        config.notifications.clone()
+    };
+
+    if !cfg.any_active() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Nostr notifications are not enabled and fully configured. Save your settings first."
+                .to_string(),
+        ));
+    }
+
+    let lang = crate::notify::Language::from_code(&cfg.language);
+    let sample = crate::notify::BroadcastNotification {
+        txid: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        amount_sats: 80_235,
+        source_label: Some("broadcast-pool".to_string()),
+        created_at: Some(chrono::Utc::now()),
+        broadcast_at: chrono::Utc::now(),
+        network: {
+            let config = state
+                .config
+                .lock()
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            config.network.network_type.data_dir_name().to_string()
+        },
+    };
+
+    let mut results = serde_json::Map::new();
+    let mut any_failure = false;
+
+    if cfg.nostr_active() {
+        match crate::notify::nostr::send(&cfg.nostr, &sample, lang).await {
+            Ok(()) => {
+                results.insert("nostr".into(), serde_json::json!({ "ok": true }));
+            }
+            Err(e) => {
+                any_failure = true;
+                results.insert(
+                    "nostr".into(),
+                    serde_json::json!({ "ok": false, "error": e.to_string() }),
+                );
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "ok": !any_failure,
+        "channels": results,
+    })))
+}
+
 async fn security_acknowledge(State(state): State<AppState>) -> Json<serde_json::Value> {
     state.pool_manager.clear_safe_mode();
     Json(serde_json::json!({ "ok": true }))
@@ -495,6 +575,17 @@ struct ConfigResponse {
     indexer_auto_detected: bool,
     network_changed: bool,
     supported_networks: Vec<String>,
+    notifications_enabled: bool,
+    notifications_language: String,
+    nostr_enabled: bool,
+    nostr_recipient_npub: String,
+    nostr_relays: Vec<String>,
+    /// Public identity the app sends from, so the user can recognise/whitelist it. Derived from
+    /// the stored nsec; empty when no key exists yet. The nsec is never exposed.
+    nostr_app_npub: String,
+    /// SOCKS proxy actually in effect for .onion relays; empty means direct connection.
+    nostr_tor_socks: String,
+    nostr_tor_socks_effective: String,
 }
 
 async fn get_config(State(state): State<AppState>) -> Result<Json<ConfigResponse>, (StatusCode, String)> {
@@ -532,6 +623,12 @@ struct SaveConfigRequest {
     max_fee_rate: Option<f64>,
     liana_vb_enabled: Option<bool>,
     liana_vb_target_height: Option<u64>,
+    notifications_enabled: Option<bool>,
+    notifications_language: Option<String>,
+    nostr_enabled: Option<bool>,
+    nostr_recipient_npub: Option<String>,
+    nostr_relays: Option<Vec<String>>,
+    nostr_tor_socks: Option<String>,
 }
 
 async fn save_config(
@@ -622,6 +719,59 @@ async fn save_config(
             );
         } else {
             config.schedule.liana_virtual_block.enabled = false;
+        }
+    }
+
+    // Notifications. The app's nsec is never accepted from the client: it is generated here on
+    // first activation and only ever leaves as the derived npub.
+    if let Some(v) = req.notifications_enabled {
+        config.notifications.enabled = v;
+    }
+    if let Some(v) = req.notifications_language {
+        config.notifications.language = if v.trim().is_empty() {
+            "en".to_string()
+        } else {
+            v.trim().to_lowercase()
+        };
+    }
+    if let Some(v) = req.nostr_enabled {
+        config.notifications.nostr.enabled = v;
+    }
+    if let Some(v) = req.nostr_recipient_npub {
+        config.notifications.nostr.recipient_npub = v.trim().to_string();
+    }
+    if let Some(v) = req.nostr_relays {
+        config.notifications.nostr.relays = v
+            .into_iter()
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .collect();
+    }
+    if let Some(v) = req.nostr_tor_socks {
+        config.notifications.nostr.tor_socks = v.trim().to_string();
+    }
+
+    if config.notifications.nostr.enabled && config.notifications.nostr.app_nsec.is_empty() {
+        match crate::notify::nostr::generate_nsec() {
+            Ok(nsec) => {
+                config.notifications.nostr.app_nsec = nsec;
+                tracing::info!("Generated Nostr sending identity for notifications");
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Could not generate a Nostr identity: {}", e),
+                ))
+            }
+        }
+    }
+
+    // Reject a recipient we could never send to, rather than failing silently at broadcast time.
+    if config.notifications.nostr.enabled && !config.notifications.nostr.recipient_npub.is_empty() {
+        if let Err(e) =
+            crate::notify::nostr::validate_npub(&config.notifications.nostr.recipient_npub)
+        {
+            return Err((StatusCode::BAD_REQUEST, e.to_string()));
         }
     }
 
