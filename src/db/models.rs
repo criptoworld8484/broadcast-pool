@@ -89,9 +89,16 @@ pub struct BroadcastTx {
     /// Required nLockTime target (unix seconds for timestamp locktimes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locktime_target: Option<u64>,
-    /// Seconds until chain MTP reaches locktime_target (0 when satisfied).
+    /// Seconds until chain MTP reaches locktime_target (0 when satisfied). Only for `time` locks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locktime_remaining_secs: Option<i64>,
+    /// `time` (timestamp nLockTime, gated on MTP) or `height` (block nLockTime, gated on the
+    /// tip). Absent when the tx carries no nLockTime at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locktime_kind: Option<String>,
+    /// Blocks until the tip reaches locktime_target (0 when satisfied). Only for `height` locks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locktime_remaining_blocks: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locktime_satisfied: Option<bool>,
     /// Latest BTC/fiat price from price feed (enriched at API layer).

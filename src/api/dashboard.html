@@ -1445,6 +1445,13 @@
                 cfg_liana_vb_approx: 'approx.',
                 cfg_scheduled_datetime: 'Scheduled Date & Time (optional)',
                 cfg_scheduled_hint: 'If set, overrides delay. Leave empty to use random delay hours',
+                bn_button: 'Broadcast now',
+                bn_title: 'Broadcast immediately, ignoring the schedule',
+                bn_confirm: 'Broadcast {tx} to the network right now, ignoring its schedule?',
+                bn_sent: 'Transaction broadcast.',
+                bn_reason_time: 'Waiting for its own signed nLockTime \u2014 {time} to go. The network would reject it before that.',
+                bn_reason_height: 'Waiting for its own signed nLockTime at block {block} \u2014 {n} block(s) to go. The network would reject it before that.',
+                bn_reason_unknown: 'Cannot check its nLockTime: no chain data source available.',
                 cfg_notif_title: 'Broadcast Notifications',
                 cfg_notif_enable: 'Notify me when a waiting transaction is broadcast',
                 cfg_notif_hint: 'Sends a private message the moment a retained transaction is redistributed to the network. Never affects broadcasting.',
@@ -1607,6 +1614,13 @@
                 cfg_liana_vb_approx: 'aprox.',
                 cfg_scheduled_datetime: 'Fecha y Hora Programada (opcional)',
                 cfg_scheduled_hint: 'Si se define, anula el retraso. Dejar vac\u00edo para usar horas aleatorias',
+                bn_button: 'Difundir ahora',
+                bn_title: 'Difundir de inmediato, ignorando la programaci\u00f3n',
+                bn_confirm: '\u00bfDifundir {tx} a la red ahora mismo, ignorando su programaci\u00f3n?',
+                bn_sent: 'Transacci\u00f3n difundida.',
+                bn_reason_time: 'Esperando su propio nLockTime firmado \u2014 faltan {time}. La red la rechazar\u00eda antes.',
+                bn_reason_height: 'Esperando su propio nLockTime firmado en el bloque {block} \u2014 faltan {n} bloque(s). La red la rechazar\u00eda antes.',
+                bn_reason_unknown: 'No se puede comprobar su nLockTime: sin fuente de datos de la cadena.',
                 cfg_notif_title: 'Avisos de difusi\u00f3n',
                 cfg_notif_enable: 'Av\u00edsame cuando se difunda una transacci\u00f3n en espera',
                 cfg_notif_hint: 'Env\u00eda un mensaje privado en el momento en que una transacci\u00f3n retenida se redistribuye a la red. Nunca afecta a la difusi\u00f3n.',
@@ -2065,6 +2079,48 @@
             return tx.locktime_remaining_secs > 0 && tx.locktime_satisfied === false;
         }
 
+        // "Broadcast now" overrides OUR scheduling (a date you set, a random delay, a Liana
+        // virtual block) but never an nLockTime signed into the transaction — the network
+        // rejects a non-final tx. Everything below decides which of those a row is in.
+        function canBroadcastNow(tx) {
+            if (tx.status === 'broadcast' || tx.status === 'confirmed') return false;
+            // Undecided (no chain clock) counts as blocked: never offer what may be rejected.
+            if (tx.nlocktime > 0 && tx.locktime_satisfied !== true) return false;
+            return true;
+        }
+
+        // Why a row cannot be broadcast right now, in the user's words. Returns '' when it can.
+        function broadcastBlockedReason(tx) {
+            if (tx.status === 'broadcast' || tx.status === 'confirmed') return '';
+            if (!(tx.nlocktime > 0)) return '';
+            if (tx.locktime_satisfied === true) return '';
+            if (tx.locktime_satisfied == null) return t('bn_reason_unknown');
+            if (tx.locktime_kind === 'height') {
+                return t('bn_reason_height')
+                    .replace('{block}', tx.locktime_target)
+                    .replace('{n}', tx.locktime_remaining_blocks != null ? tx.locktime_remaining_blocks : '?');
+            }
+            return t('bn_reason_time').replace('{time}', formatRemaining(tx.locktime_remaining_secs));
+        }
+
+        async function broadcastNow(id) {
+            const tx = allTxs.find(t => t.id === id);
+            const label = tx && tx.txid ? tx.txid.slice(0, 12) + '…' : id;
+            if (!confirm(t('bn_confirm').replace('{tx}', label))) return;
+            try {
+                const res = await fetch(`/api/transactions/${id}/broadcast-now`, { method: 'POST' });
+                if (res.ok) {
+                    toast(t('bn_sent'));
+                    await loadTransactions();
+                } else {
+                    // The backend explains exactly why (non-final, safe mode, no chain clock).
+                    toast(await res.text());
+                }
+            } catch (e) {
+                toast(String(e));
+            }
+        }
+
         function defaultScheduleDatetime(tx) {
             const now = new Date();
             now.setMinutes(now.getMinutes() + 30);
@@ -2437,7 +2493,7 @@
                         <td>${sourceCell(tx)}</td>
                         <td><span class="status status-${statusInfo.cls}">${statusInfo.label}</span></td>
                         <td><span class="status ${typeClass}">${typeLabel}</span></td>
-                        <td class="time">${formatPriceTrigger(tx)}${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + schedLabel + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}${(tx.broadcast_mode === 'scheduled' || isUserScheduledMode(tx.broadcast_mode)) && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}${tx.locktime_deferred && tx.original_scheduled_time ? '<br><span style="font-size: 10px; color: #FF8E8E;">' + t('detail_original_scheduled') + ': ' + new Date(tx.original_scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}) + '</span>' : ''}${showMtpRemaining(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">MTP: ' + formatRemaining(tx.locktime_remaining_secs) + '</span>' : ''}${isUserScheduledMode(tx.broadcast_mode) && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}${tx.broadcast_mode === 'immediate' || (!tx.scheduled_time && tx.broadcast_mode !== 'by_block' && !isUserScheduledMode(tx.broadcast_mode) && tx.schedule_trigger !== 'price') ? '<span style="color: var(--text-dim);">-</span>' : ''}</td>
+                        <td class="time">${formatPriceTrigger(tx)}${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + schedLabel + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}${(tx.broadcast_mode === 'scheduled' || isUserScheduledMode(tx.broadcast_mode)) && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}${tx.locktime_deferred && tx.original_scheduled_time ? '<br><span style="font-size: 10px; color: #FF8E8E;">' + t('detail_original_scheduled') + ': ' + new Date(tx.original_scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}) + '</span>' : ''}${showMtpRemaining(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">MTP: ' + formatRemaining(tx.locktime_remaining_secs) + '</span>' : ''}${broadcastBlockedReason(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">' + broadcastBlockedReason(tx) + '</span>' : ''}${isUserScheduledMode(tx.broadcast_mode) && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}${tx.broadcast_mode === 'immediate' || (!tx.scheduled_time && tx.broadcast_mode !== 'by_block' && !isUserScheduledMode(tx.broadcast_mode) && tx.schedule_trigger !== 'price') ? '<span style="color: var(--text-dim);">-</span>' : ''}</td>
                         <td class="actions">
                             <button class="btn btn-sm btn-outline" onclick="showDetail('${tx.id}')" title="${t('btn_view_details')}">&#128065;</button>
                             ${shouldShowReschedule(tx) ? `<button class="btn btn-sm" onclick="reschedule('${tx.id}')">${t('btn_reschedule')}</button>` : ''}
@@ -2446,6 +2502,9 @@
                             ${tx.locktime_deferred ? '<span style="font-size: 11px; color: #FF8E8E; opacity: 0.9;">' + t('btn_deferred_mtp') + '</span>' : ''}
                             ${tx.status === 'pending' && tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="font-size: 11px; color: var(--amber); opacity: 0.8;">' + t('btn_waiting_block') + '</span>' : ''}
                             ${tx.status === 'failed' ? `<button class="btn btn-sm" onclick="retryTx('${tx.id}')">${t('btn_retry')}</button>` : ''}
+                            ${tx.status !== 'broadcast' && tx.status !== 'confirmed' ? (canBroadcastNow(tx)
+                                ? `<button class="btn btn-sm" style="background: var(--btc);" onclick="broadcastNow('${tx.id}')" title="${t('bn_title')}">${t('bn_button')}</button>`
+                                : `<button class="btn btn-sm" disabled style="opacity:0.45; cursor:not-allowed;" title="${broadcastBlockedReason(tx)}">${t('bn_button')}</button>`) : ''}
                             ${tx.status !== 'confirmed' ? `<button class="btn btn-sm btn-red" onclick="remove('${tx.id}')">${t('btn_remove')}</button>` : ''}
                         </td>
                     </tr>`;

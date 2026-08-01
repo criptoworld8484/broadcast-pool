@@ -1751,6 +1751,8 @@ fn map_broadcast_row(row: &rusqlite::Row, key: &[u8; 32]) -> rusqlite::Result<Br
         chain_mtp: None,
         locktime_target: None,
         locktime_remaining_secs: None,
+        locktime_kind: None,
+        locktime_remaining_blocks: None,
         locktime_satisfied: None,
         current_btc_price: None,
         tampered,

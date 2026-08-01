@@ -476,6 +476,77 @@ impl PoolManager {
         Ok(scheduled)
     }
 
+    /// User-initiated "broadcast this now", overriding any *app-level* schedule: a date the user
+    /// set, a random delay, a deferral, or a Liana virtual-block target.
+    ///
+    /// It cannot override an nLockTime signed into the transaction — the network rejects a
+    /// non-final tx — so that is checked first and reported as a plain error rather than
+    /// attempted. Unlike the scheduler loop this does not defer or record a miss: the user asked
+    /// for an answer now, so failures come straight back.
+    pub fn broadcast_now(&self, id: &str) -> Result<String> {
+        if self.is_safe_mode() {
+            anyhow::bail!(
+                "Safe mode is active after a tampered row was detected — broadcasting is halted \
+                 until it is acknowledged."
+            );
+        }
+
+        let tx = self.db.get_broadcast_tx_by_id(id)?;
+
+        if tx.tampered == Some(true) {
+            self.enter_safe_mode(&tx.id);
+            anyhow::bail!("This row failed its integrity check — broadcasting halted.");
+        }
+
+        match tx.status {
+            TxStatus::Broadcast => anyhow::bail!("This transaction has already been broadcast."),
+            TxStatus::Confirmed => anyhow::bail!("This transaction is already confirmed."),
+            _ => {}
+        }
+
+        let locktime_ok = self.is_locktime_satisfied(tx.nlocktime).map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot verify this transaction's nLockTime without a chain data source ({e}). \
+                 Refusing to broadcast blind."
+            )
+        })?;
+        if !locktime_ok {
+            let n = tx.nlocktime.unwrap_or(0);
+            if n > 500_000_000 {
+                let remaining = self
+                    .get_median_time_past_cached()
+                    .map(|mtp| n.saturating_sub(mtp))
+                    .unwrap_or(0);
+                anyhow::bail!(
+                    "The transaction's own nLockTime is not reached yet (~{}s to go). The network \
+                     would reject it as non-final.",
+                    remaining
+                );
+            }
+            anyhow::bail!(
+                "The transaction's own nLockTime targets block {}, which the chain has not \
+                 reached. The network would reject it as non-final.",
+                n
+            );
+        }
+
+        let txid = self.broadcast_transaction(&tx.tx_hex)?;
+        let fee_rate = tx.target_fee_rate.unwrap_or(0.0);
+        self.mark_broadcast(&tx.id, &txid, fee_rate)?;
+        tracing::info!("Broadcast on user request: {} (txid: {})", tx.id, txid);
+
+        let _ = self.broadcast_notifications.send(BroadcastNotification {
+            txid: txid.clone(),
+            amount_sats: crate::notify::btc_to_sats(tx.total_value_btc),
+            source_label: tx.source_label.clone(),
+            created_at: Some(tx.created_at),
+            broadcast_at: Utc::now(),
+            network: tx.network.clone(),
+        });
+
+        Ok(txid)
+    }
+
     pub fn broadcast_due_transactions(&self) -> Result<Vec<(String, Result<String>)>> {
         if self.is_safe_mode() {
             tracing::warn!("SAFE MODE active — skipping broadcast_due_transactions (global halt)");
@@ -503,7 +574,13 @@ impl PoolManager {
                 self.enter_safe_mode(&tx.id);
                 break;
             }
-            if !self.is_locktime_satisfied(tx.nlocktime)? {
+            let locktime_ok = self.is_locktime_satisfied(tx.nlocktime).map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot verify this transaction's nLockTime without a chain data source ({e}). \
+                 Refusing to broadcast blind."
+            )
+        })?;
+        if !locktime_ok {
                 if tx.nlocktime.is_some_and(|n| n > 500_000_000) {
                     if tx.broadcast_missed_at.is_none() {
                         let missed_at = now.to_rfc3339();
@@ -736,6 +813,14 @@ impl PoolManager {
         self.get_median_time_past_cached()
     }
 
+    /// Seed the MTP cache. Test-only: production fills it from the chain backend.
+    #[cfg(test)]
+    pub(crate) fn seed_mtp_cache(&self, mtp: u64) {
+        if let Ok(mut cache) = self.mtp_cache.lock() {
+            *cache = Some((Instant::now(), mtp));
+        }
+    }
+
     pub fn get_median_time_past_cached(&self) -> Result<u64> {
         // Matches the health poller interval. MTP only advances with a new block (~10 min) and is
         // monotonic non-decreasing, so a stale value can only delay a broadcast, never fire one early.
@@ -892,6 +977,8 @@ impl PoolManager {
         tx.chain_mtp = None;
         tx.locktime_target = None;
         tx.locktime_remaining_secs = None;
+        tx.locktime_kind = None;
+        tx.locktime_remaining_blocks = None;
         tx.locktime_satisfied = None;
 
         let emitted = matches!(tx.status, TxStatus::Broadcast | TxStatus::Confirmed);
@@ -908,7 +995,7 @@ impl PoolManager {
         }
 
         let nlock = match tx.nlocktime {
-            Some(n) if n > 0 && n > 500_000_000 => n,
+            Some(n) if n > 0 => n,
             _ => {
                 tx.locktime_waiting = Some(false);
                 return;
@@ -916,6 +1003,32 @@ impl PoolManager {
         };
 
         tx.locktime_target = Some(nlock);
+        tx.locktime_kind = Some(if nlock < 500_000_000 { "height" } else { "time" }.to_string());
+
+        // Block-height nLockTime: the gate is the chain tip, not MTP. Read the cached height
+        // (chain_health, refreshed by the poller) rather than check_block_height(), which does
+        // network I/O — this runs once per row of the transaction list.
+        if nlock < 500_000_000 {
+            let Some(height) = self.chain_health().height else {
+                // Height unknown: leave `locktime_satisfied` as None so callers can tell
+                // "not satisfied" from "we don't know", and don't claim the tx is ready.
+                tracing::debug!("Chain height unknown, cannot resolve locktime for {}", tx.id);
+                return;
+            };
+            let satisfied = height >= nlock;
+            tx.locktime_satisfied = Some(satisfied);
+            tx.locktime_remaining_blocks = Some(if satisfied {
+                0
+            } else {
+                nlock as i64 - height as i64
+            });
+            tx.locktime_waiting = Some(
+                !emitted
+                    && matches!(tx.status, TxStatus::Pending | TxStatus::Scheduled)
+                    && !satisfied,
+            );
+            return;
+        }
 
         let mtp = match self.get_median_time_past_cached() {
             Ok(mtp) => mtp,
@@ -1568,6 +1681,210 @@ mod tests {
 
         let err = pm.run_scheduler_tick().expect_err("tick must refuse without a chain source");
         assert!(err.to_string().contains(NO_CHAIN_SOURCE));
+    }
+
+    fn tx_with_locktime(nlocktime: u64, status: TxStatus) -> BroadcastTx {
+        let mut tx = BroadcastTx {
+            id: "t1".into(),
+            tx_hex: "00".into(),
+            txid: None,
+            status,
+            network: "testnet4".into(),
+            nlocktime: Some(nlocktime),
+            broadcast_mode: Some("by_block".into()),
+            scheduled_time: None,
+            broadcast_at: None,
+            confirmed_at: None,
+            block_height: None,
+            target_fee_rate: None,
+            actual_fee_rate: None,
+            source_label: Some("sparrow".into()),
+            destination_address: None,
+            utxo_count: 0,
+            total_value_btc: 0.0,
+            replacement_of: None,
+            error_message: None,
+            retry_count: 0,
+            broadcast_missed_at: None,
+            original_scheduled_time: None,
+            defer_until: None,
+            schedule_trigger: None,
+            target_price: None,
+            price_currency: None,
+            price_condition: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            locktime_waiting: None,
+            locktime_deferred: None,
+            can_reschedule: None,
+            chain_mtp: None,
+            locktime_target: None,
+            locktime_remaining_secs: None,
+            locktime_kind: None,
+            locktime_remaining_blocks: None,
+            locktime_satisfied: None,
+            current_btc_price: None,
+            tampered: None,
+        };
+        tx.locktime_target = None;
+        tx
+    }
+
+    // A future block-height nLockTime is non-final: the network would reject it. The dashboard
+    // needs to know that to disable "broadcast now", and before this the enrichment bailed out
+    // early for height locks and left locktime_satisfied as None.
+    #[test]
+    fn height_locktime_in_the_future_is_reported_unsatisfied() {
+        let (pm, _dir) = test_manager();
+        pm.note_indexer_success(145_000);
+
+        let mut tx = tx_with_locktime(145_695, TxStatus::Scheduled);
+        pm.enrich_tx_locktime(&mut tx);
+
+        assert_eq!(tx.locktime_kind.as_deref(), Some("height"));
+        assert_eq!(tx.locktime_satisfied, Some(false));
+        assert_eq!(tx.locktime_remaining_blocks, Some(695));
+        assert_eq!(tx.locktime_waiting, Some(true));
+        // Seconds are meaningless for a height lock and must not be invented.
+        assert_eq!(tx.locktime_remaining_secs, None);
+    }
+
+    #[test]
+    fn height_locktime_already_reached_is_satisfied() {
+        let (pm, _dir) = test_manager();
+        pm.note_indexer_success(145_800);
+
+        let mut tx = tx_with_locktime(145_695, TxStatus::Scheduled);
+        pm.enrich_tx_locktime(&mut tx);
+
+        assert_eq!(tx.locktime_satisfied, Some(true));
+        assert_eq!(tx.locktime_remaining_blocks, Some(0));
+        assert_eq!(tx.locktime_waiting, Some(false));
+    }
+
+    // Unknown tip must stay None, not false: "we don't know" and "not ready" lead to different
+    // UI, and claiming ready when blind could offer a broadcast the network would reject.
+    #[test]
+    fn height_locktime_with_unknown_tip_stays_undecided() {
+        let (pm, _dir) = test_manager();
+        let mut tx = tx_with_locktime(145_695, TxStatus::Scheduled);
+        pm.enrich_tx_locktime(&mut tx);
+
+        assert_eq!(tx.locktime_kind.as_deref(), Some("height"));
+        assert_eq!(tx.locktime_satisfied, None);
+        assert_eq!(tx.locktime_remaining_blocks, None);
+    }
+
+    #[test]
+    fn a_tx_without_locktime_is_never_waiting() {
+        let (pm, _dir) = test_manager();
+        pm.note_indexer_success(145_000);
+        let mut tx = tx_with_locktime(0, TxStatus::Pending);
+        pm.enrich_tx_locktime(&mut tx);
+
+        assert_eq!(tx.locktime_waiting, Some(false));
+        assert_eq!(tx.locktime_kind, None);
+        assert_eq!(tx.locktime_satisfied, None);
+    }
+
+    // An already-broadcast tx is not "waiting" whatever its locktime says.
+    #[test]
+    fn an_emitted_tx_is_not_waiting() {
+        let (pm, _dir) = test_manager();
+        pm.note_indexer_success(145_000);
+        let mut tx = tx_with_locktime(145_695, TxStatus::Broadcast);
+        pm.enrich_tx_locktime(&mut tx);
+
+        assert_eq!(tx.locktime_satisfied, Some(false));
+        assert_eq!(tx.locktime_waiting, Some(false));
+    }
+
+    fn insert_tx(pm: &PoolManager, nlocktime: Option<u64>) -> BroadcastTx {
+        pm.import_transaction(&NewBroadcastTx {
+            tx_hex: "0200000001000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000".into(),
+            network: "testnet4".into(),
+            nlocktime,
+            broadcast_mode: Some("manual".into()),
+            scheduled_time: None,
+            target_fee_rate: None,
+            source_label: Some("sparrow".into()),
+            destination_address: None,
+            utxo_count: Some(1),
+            total_value_btc: Some(0.001),
+            replacement_of: None,
+        })
+        .expect("import")
+    }
+
+    // The button must never be able to push a non-final tx: the network would reject it, and the
+    // user would get an opaque node error instead of an explanation.
+    #[test]
+    fn broadcast_now_refuses_an_unreached_height_locktime() {
+        let (pm, _dir) = test_manager();
+        pm.note_indexer_success(145_000);
+        let tx = insert_tx(&pm, Some(145_695));
+
+        let err = pm.broadcast_now(&tx.id).unwrap_err().to_string();
+        assert!(err.contains("145695"), "{err}");
+        assert!(err.contains("non-final"), "{err}");
+    }
+
+    #[test]
+    fn broadcast_now_refuses_an_unreached_time_locktime() {
+        let (pm, _dir) = test_manager();
+        let now = Utc::now().timestamp() as u64;
+        pm.seed_mtp_cache(now);
+        let tx = insert_tx(&pm, Some(now + 600));
+
+        let err = pm.broadcast_now(&tx.id).unwrap_err().to_string();
+        assert!(err.contains("non-final"), "{err}");
+        assert!(err.contains("600s") || err.contains("to go"), "{err}");
+    }
+
+    // With no chain clock we cannot tell whether a locktime is reached. Refuse and say so,
+    // rather than broadcast blind or emit an opaque internal error.
+    #[test]
+    fn broadcast_now_refuses_when_the_chain_clock_is_unavailable() {
+        let (pm, _dir) = test_manager();
+        let tx = insert_tx(&pm, Some((Utc::now().timestamp() as u64) + 600));
+
+        let err = pm.broadcast_now(&tx.id).unwrap_err().to_string();
+        assert!(err.contains("without a chain data source"), "{err}");
+    }
+
+    // Safe mode is a global halt after tamper detection; a user-facing button must not be a way
+    // around it.
+    #[test]
+    fn broadcast_now_respects_safe_mode() {
+        let (pm, _dir) = test_manager();
+        let tx = insert_tx(&pm, None);
+        pm.enter_safe_mode("someone");
+
+        let err = pm.broadcast_now(&tx.id).unwrap_err().to_string();
+        assert!(err.contains("Safe mode"), "{err}");
+    }
+
+    #[test]
+    fn broadcast_now_refuses_an_already_broadcast_tx() {
+        let (pm, _dir) = test_manager();
+        let tx = insert_tx(&pm, None);
+        pm.mark_broadcast(&tx.id, "deadbeef", 1.0).expect("mark");
+
+        let err = pm.broadcast_now(&tx.id).unwrap_err().to_string();
+        assert!(err.contains("already been broadcast"), "{err}");
+    }
+
+    // With no locktime and no chain backend the gates pass and it reaches the actual broadcast,
+    // which fails for lack of a node — proving the refusal above came from the locktime check
+    // and not from something earlier.
+    #[test]
+    fn broadcast_now_passes_the_gates_when_nothing_blocks_it() {
+        let (pm, _dir) = test_manager();
+        let tx = insert_tx(&pm, None);
+
+        let err = pm.broadcast_now(&tx.id).unwrap_err().to_string();
+        assert!(!err.contains("non-final"), "{err}");
+        assert!(!err.contains("Safe mode"), "{err}");
     }
 
     // A data path that sees the indexer fail must demote it immediately, or every later call keeps
