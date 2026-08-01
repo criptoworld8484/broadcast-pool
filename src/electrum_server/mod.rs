@@ -389,6 +389,9 @@ struct SessionState {
     saw_server_version: bool,
     /// Client name from `server.version` params (e.g. "Sparrow 2.x"), when sent.
     wallet_label: Option<String>,
+    /// Whether this session issued `blockchain.headers.subscribe`. The Electrum protocol only
+    /// allows pushing header notifications after that, and an unsolicited one confuses clients.
+    subscribed_headers: bool,
 }
 
 impl SessionState {
@@ -403,6 +406,7 @@ impl SessionState {
             rpc_lines_handled: 0,
             saw_server_version: false,
             wallet_label: None,
+            subscribed_headers: false,
         }
     }
 
@@ -751,7 +755,7 @@ fn line_is_batch(line: &str) -> bool {
 }
 
 /// Prefer live pool indexer URL (healed after Umbrel startup) over session snapshot.
-fn resolve_live_indexer_url(pool_manager: &PoolManager, config: &Arc<Mutex<Config>>) -> String {
+pub fn resolve_live_indexer_url(pool_manager: &PoolManager, config: &Arc<Mutex<Config>>) -> String {
     if let Some(url) = pool_manager.get_indexer_url() {
         if !url.is_empty() {
             return url;
@@ -900,7 +904,7 @@ fn parse_headers_subscribe_result(msg: &serde_json::Value) -> Option<(u64, Strin
     Some((height, hex.to_string()))
 }
 
-fn refresh_chain_tip_cache(indexer_url: &str, pool_manager: &PoolManager) {
+pub fn refresh_chain_tip_cache(indexer_url: &str, pool_manager: &PoolManager) {
     if indexer_url.is_empty() {
         return;
     }
@@ -1275,6 +1279,7 @@ async fn handle_one_subrequest(
     }
 
     if request.method == "blockchain.headers.subscribe" {
+        session.subscribed_headers = true;
         let vtip = {
             let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
             let is_liana = session.effective_source(source_label) == "liana";
@@ -1877,6 +1882,10 @@ async fn process_client_line(
     // served instead of the real cached tip.
     if let Ok(reqs) = parse_subrequests(line_str) {
         if reqs.len() == 1 && reqs[0].method == "blockchain.headers.subscribe" {
+            // The client subscribed, whichever path answers it. This fast path returns early,
+            // so without marking it here a session served from the warm cache — which is every
+            // Sparrow session — would never receive a header push.
+            session.subscribed_headers = true;
             let is_liana = session.effective_source(source_label) == "liana";
             let use_instant_cache = {
                 let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
@@ -2096,6 +2105,7 @@ async fn handle_connection(
     let mut client_buf = Vec::new();
     let mut session = SessionState::new();
     let mut scripthash_rx = pool_manager.subscribe_scripthash_changes();
+    let mut chain_tip_rx = pool_manager.subscribe_chain_tip();
 
     client_stream.set_nodelay(true)?;
 
@@ -2135,6 +2145,56 @@ async fn handle_connection(
                             client_buf.len(),
                             preview
                         );
+                    }
+                }
+            }
+            Ok(tip) = chain_tip_rx.recv() => {
+                // The Electrum protocol requires the server to push every new tip to header
+                // subscribers. Without this a wallet keeps the height it got when it subscribed:
+                // nLockTime is stamped with a stale height and confirmations (tip - tx_height + 1)
+                // never advance, which only a reconnect used to fix.
+                if session.subscribed_headers && !session.client_busy {
+                    // An armed Liana session lives on a fabricated tip ABOVE the real one; pushing
+                    // the real height would make its chain appear to go backwards and expose the
+                    // fiction. Re-fabricate at the same offset instead.
+                    let vtip = {
+                        match config.lock() {
+                            Ok(cfg) => {
+                                let is_liana = session.effective_source(source_label) == "liana";
+                                virtual_tip_height(&cfg, is_liana)
+                            }
+                            Err(_) => None,
+                        }
+                    };
+                    let pushed = match vtip {
+                        Some(v) => {
+                            let up_to = v.max(tip.height + 1);
+                            match virtual_headers::header_hex_at(tip.height, &tip.hex, up_to) {
+                                Ok(Some(hex)) => Some((up_to, hex)),
+                                _ => None,
+                            }
+                        }
+                        None => Some((tip.height, tip.hex.clone())),
+                    };
+                    if let Some((height, hex)) = pushed {
+                        let notification_json = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "blockchain.headers.subscribe",
+                            "params": [{ "height": height, "hex": hex }]
+                        });
+                        if let Ok(payload) = serde_json::to_vec(&notification_json) {
+                            let mut out = payload;
+                            out.push(b'\n');
+                            if client_stream.write_all(&out).await.is_ok() {
+                                let _ = client_stream.flush().await;
+                                tracing::info!(
+                                    "Pushed new chain tip height={} to {} [{}]",
+                                    height,
+                                    peer_addr,
+                                    source_label
+                                );
+                            }
+                        }
                     }
                 }
             }

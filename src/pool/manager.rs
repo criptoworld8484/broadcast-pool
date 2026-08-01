@@ -39,6 +39,13 @@ pub struct ScripthashNotification {
     pub scripthash: String,
 }
 
+/// A new chain tip, to be pushed to subscribed wallets as an Electrum header notification.
+#[derive(Clone, Debug)]
+pub struct ChainTipNotification {
+    pub height: u64,
+    pub hex: String,
+}
+
 pub struct PoolManager {
     db: Arc<Database>,
     rpc: Option<Arc<BitcoinRpc>>,
@@ -56,6 +63,9 @@ pub struct PoolManager {
     price_feed: PriceFeed,
     /// Broadcast channel for scripthash state changes (virtual mempool add/remove).
     scripthash_notifications: tokio::sync::broadcast::Sender<ScripthashNotification>,
+    /// Broadcast channel for chain tip advances, so wallet sessions can push
+    /// `blockchain.headers.subscribe` notifications as the Electrum protocol requires.
+    chain_tip_notifications: tokio::sync::broadcast::Sender<ChainTipNotification>,
     /// Broadcast channel for user-facing "your tx was redistributed" events. Drained by
     /// `run_notification_dispatcher`; a full or unsubscribed channel is silently ignored so
     /// notification delivery can never affect broadcasting.
@@ -81,6 +91,7 @@ impl PoolManager {
         config: Arc<Mutex<Config>>,
     ) -> Self {
         let (scripthash_notifications, _) = tokio::sync::broadcast::channel(256);
+        let (chain_tip_notifications, _) = tokio::sync::broadcast::channel(64);
         let (broadcast_notifications, _) = tokio::sync::broadcast::channel(256);
         Self {
             db,
@@ -94,6 +105,7 @@ impl PoolManager {
             health_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             price_feed: PriceFeed::new(),
             scripthash_notifications,
+            chain_tip_notifications,
             broadcast_notifications,
             safe_mode: Arc::new(AtomicBool::new(false)),
             tampered_ids: Arc::new(Mutex::new(Vec::new())),
@@ -136,6 +148,11 @@ impl PoolManager {
         self.scripthash_notifications.subscribe()
     }
 
+    /// Subscribe to chain tip advances (for Electrum header push notifications).
+    pub fn subscribe_chain_tip(&self) -> tokio::sync::broadcast::Receiver<ChainTipNotification> {
+        self.chain_tip_notifications.subscribe()
+    }
+
     /// Subscribe to "a waiting tx was redistributed" events (notification dispatcher).
     pub fn subscribe_broadcast_notifications(
         &self,
@@ -147,8 +164,22 @@ impl PoolManager {
         if height == 0 || hex.is_empty() {
             return;
         }
-        if let Ok(mut cache) = self.cached_chain_tip.lock() {
-            *cache = Some((height, hex));
+        let changed = {
+            let Ok(mut cache) = self.cached_chain_tip.lock() else {
+                return;
+            };
+            // Only a genuinely new height is worth waking every wallet session for; the cache is
+            // rewritten on every poll with the same value most of the time. A reorg can lower the
+            // height, which is still a change wallets must see.
+            let changed = cache.as_ref().map(|(h, _)| *h) != Some(height);
+            *cache = Some((height, hex.clone()));
+            changed
+        };
+        if changed {
+            // Err just means no wallet is connected.
+            let _ = self
+                .chain_tip_notifications
+                .send(ChainTipNotification { height, hex });
         }
     }
 
@@ -1568,6 +1599,57 @@ mod tests {
 
         let err = pm.run_scheduler_tick().expect_err("tick must refuse without a chain source");
         assert!(err.to_string().contains(NO_CHAIN_SOURCE));
+    }
+
+    // Wallets must be woken for a new block, but not for the poller rewriting the same tip
+    // every 30s — that would be a push storm for no information.
+    #[test]
+    fn chain_tip_notifies_only_on_a_real_change() {
+        let (pm, _dir) = test_manager();
+        let mut rx = pm.subscribe_chain_tip();
+
+        pm.cache_chain_tip(100, "aa".into());
+        let first = rx.try_recv().expect("first tip notified");
+        assert_eq!(first.height, 100);
+        assert_eq!(first.hex, "aa");
+
+        // Same height again: no notification.
+        pm.cache_chain_tip(100, "aa".into());
+        assert!(rx.try_recv().is_err());
+
+        pm.cache_chain_tip(101, "bb".into());
+        assert_eq!(rx.try_recv().expect("new tip notified").height, 101);
+    }
+
+    // A reorg lowers the tip. Wallets still need to know.
+    #[test]
+    fn a_lower_tip_after_a_reorg_still_notifies() {
+        let (pm, _dir) = test_manager();
+        pm.cache_chain_tip(100, "aa".into());
+        let mut rx = pm.subscribe_chain_tip();
+        pm.cache_chain_tip(99, "cc".into());
+        assert_eq!(rx.try_recv().expect("reorg notified").height, 99);
+    }
+
+    // Garbage must not reach wallets, and must not clobber a good cached tip.
+    #[test]
+    fn an_empty_or_zero_tip_is_ignored() {
+        let (pm, _dir) = test_manager();
+        pm.cache_chain_tip(100, "aa".into());
+        let mut rx = pm.subscribe_chain_tip();
+
+        pm.cache_chain_tip(0, "aa".into());
+        pm.cache_chain_tip(101, String::new());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(pm.get_cached_chain_tip(), Some((100, "aa".to_string())));
+    }
+
+    // No wallet connected must not be an error path.
+    #[test]
+    fn caching_a_tip_with_no_subscribers_is_fine() {
+        let (pm, _dir) = test_manager();
+        pm.cache_chain_tip(100, "aa".into());
+        assert_eq!(pm.get_cached_chain_tip(), Some((100, "aa".to_string())));
     }
 
     // A data path that sees the indexer fail must demote it immediately, or every later call keeps
