@@ -1446,6 +1446,8 @@
                 cfg_scheduled_datetime: 'Scheduled Date & Time (optional)',
                 cfg_scheduled_hint: 'If set, overrides delay. Leave empty to use random delay hours',
                 mempool_fee_floor: '(floor \u2014 no reliable estimate)',
+                mtp_label: 'MTP (time-lock clock)',
+                mtp_tooltip: 'Median Time Past: the median timestamp of the last 11 blocks. The network validates a date-based nLockTime against this, not against the latest block\u2019s own timestamp, so it always trails what your wallet shows for that block.',
                 cfg_notif_title: 'Broadcast Notifications',
                 cfg_notif_enable: 'Notify me when a waiting transaction is broadcast',
                 cfg_notif_hint: 'Sends a private message the moment a retained transaction is redistributed to the network. Never affects broadcasting.',
@@ -1609,6 +1611,8 @@
                 cfg_scheduled_datetime: 'Fecha y Hora Programada (opcional)',
                 cfg_scheduled_hint: 'Si se define, anula el retraso. Dejar vac\u00edo para usar horas aleatorias',
                 mempool_fee_floor: '(m\u00ednimo \u2014 sin estimaci\u00f3n fiable)',
+                mtp_label: 'MTP (reloj de bloqueos)',
+                mtp_tooltip: 'Median Time Past: la mediana de las marcas de tiempo de los 11 \u00faltimos bloques. La red valida contra este valor un nLockTime por fecha, no contra la hora del \u00faltimo bloque, por lo que siempre va por detr\u00e1s de la que muestra tu cartera para ese bloque.',
                 cfg_notif_title: 'Avisos de difusi\u00f3n',
                 cfg_notif_enable: 'Av\u00edsame cuando se difunda una transacci\u00f3n en espera',
                 cfg_notif_hint: 'Env\u00eda un mensaje privado en el momento en que una transacci\u00f3n retenida se redistribuye a la red. Nunca afecta a la difusi\u00f3n.',
@@ -2992,7 +2996,13 @@
                     if (status.chain_height) {
                         let heightText = `Block height: ${status.chain_height}`;
                         if (status.chain_mtp) {
-                            heightText += ` | MTP: ${formatUnixTs(status.chain_mtp)}`;
+                            // MTP is the median of the last 11 block timestamps, so it always
+                            // trails the tip's own timestamp — users compare it against the time
+                            // their wallet shows for the block and think one of them is wrong.
+                            // It is the value shown because it is what the network validates a
+                            // date-based nLockTime against.
+                            heightText += ` | ${t('mtp_label')}: ${formatUnixTs(status.chain_mtp)}`;
+                            height.title = t('mtp_tooltip');
                         }
                         if (status.chain_source === 'bitcoin_core') {
                             heightText += ' (Bitcoin Core)';

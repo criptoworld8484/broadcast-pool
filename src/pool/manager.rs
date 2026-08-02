@@ -826,6 +826,42 @@ impl PoolManager {
         Ok(results)
     }
 
+    /// Tell subscribed wallets that a transaction just confirmed, by nudging the scripthashes
+    /// it touches so they re-query.
+    ///
+    /// Nothing else does this. We relay no notifications from the indexer — the connection is
+    /// request/response only — so when a transaction is mined the wallet is never told, keeps
+    /// the last status it saw (unconfirmed) and only corrects itself on reconnect, which
+    /// re-queries everything. This closes that gap for transactions the pool broadcast.
+    ///
+    /// Runs once per transaction: on the next pass it is no longer in the `broadcast` list.
+    fn notify_tx_confirmed(&self, tx_id: &str, tx_hex: &str) {
+        // Outputs alone are free to derive; inputs need prev-tx lookups against the indexer.
+        // Both matter: a wallet may only recognise the spent side (a sweep with no change).
+        let indexer = self.get_indexer_url().unwrap_or_default();
+        let scripthashes = if indexer.is_empty() {
+            crate::pool::virtual_mempool::extract_output_scripthashes(tx_hex)
+        } else {
+            crate::pool::virtual_mempool::extract_affected_scripthashes(tx_hex, &indexer)
+        };
+
+        match scripthashes {
+            Ok(list) => {
+                for scripthash in list {
+                    // Err just means no wallet is connected.
+                    let _ = self
+                        .scripthash_notifications
+                        .send(ScripthashNotification { scripthash });
+                }
+            }
+            Err(e) => tracing::warn!(
+                "Could not derive scripthashes to announce confirmation of {}: {}",
+                tx_id,
+                e
+            ),
+        }
+    }
+
     pub fn check_confirmations(&self) -> Result<Vec<(String, bool, Option<u64>)>> {
         let network = {
             let config = self.config.lock().map_err(|e| anyhow::anyhow!("Config lock failed: {}", e))?;
@@ -845,6 +881,7 @@ impl PoolManager {
                                     // Transaction is in a block
                                     if let Ok(height) = rpc.get_block_count() {
                                         let _ = self.db.mark_confirmed(&tx.id, height);
+                                        self.notify_tx_confirmed(&tx.id, &tx.tx_hex);
                                         results.push((tx.id.clone(), true, Some(height)));
                                     } else {
                                         results.push((tx.id.clone(), true, None));
@@ -1806,6 +1843,50 @@ mod tests {
         let est = resolve_fee_estimate(Some(25.0), Some(9.0), None).expect("an answer");
         assert!(est.reliable);
         assert_eq!(est.sat_vb, 25.0);
+    }
+
+    /// A minimal one-output transaction, hex-encoded, plus the scripthash of that output.
+    fn tx_with_one_output() -> (String, String) {
+        use bitcoin::consensus::Encodable;
+        use bitcoin::{absolute::LockTime, transaction::Version, Amount, ScriptBuf, Transaction, TxOut};
+
+        let script = ScriptBuf::from_hex("0014d952c2c0d09d4ef2e1e3f0a1e3e5c8f2d4b6a7c8").unwrap();
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut { value: Amount::from_sat(1000), script_pubkey: script.clone() }],
+        };
+        let mut raw = Vec::new();
+        tx.consensus_encode(&mut raw).unwrap();
+        (
+            hex::encode(raw),
+            crate::pool::virtual_mempool::compute_scripthash(&script),
+        )
+    }
+
+    // Nothing relays the indexer's notifications, so a mined transaction never reached the
+    // wallet: it kept showing unconfirmed until a reconnect re-queried everything. Confirming
+    // must nudge the scripthashes the tx touches so the wallet asks again.
+    #[test]
+    fn confirming_a_tx_nudges_its_scripthashes() {
+        let (pm, _dir) = test_manager();
+        let (tx_hex, expected_sh) = tx_with_one_output();
+        let mut rx = pm.subscribe_scripthash_changes();
+
+        pm.notify_tx_confirmed("some-id", &tx_hex);
+
+        let got = rx.try_recv().expect("a scripthash was announced");
+        assert_eq!(got.scripthash, expected_sh);
+    }
+
+    // Undecodable hex must be logged, not panic the confirmation loop.
+    #[test]
+    fn confirming_an_undecodable_tx_is_survivable() {
+        let (pm, _dir) = test_manager();
+        let mut rx = pm.subscribe_scripthash_changes();
+        pm.notify_tx_confirmed("some-id", "not-hex");
+        assert!(rx.try_recv().is_err());
     }
 
     // A data path that sees the indexer fail must demote it immediately, or every later call keeps
