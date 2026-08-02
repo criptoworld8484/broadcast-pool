@@ -1011,6 +1011,7 @@ impl PoolManager {
                 mempool_tx_count: None,
                 fee_rate_sat_vb: None,
                 congestion: None,
+                fee_estimate_reliable: false,
             };
         };
 
@@ -1023,18 +1024,33 @@ impl PoolManager {
                     mempool_tx_count: None,
                     fee_rate_sat_vb: None,
                     congestion: None,
+                    fee_estimate_reliable: false,
                 };
             }
         };
 
-        let fee_rate = rpc.estimate_smart_fee(6).ok().flatten();
-        let congestion = fee_rate.map(|f| classify_mempool_congestion(f, &network).to_string());
+        // Two targets apart enough that a working estimator must price them differently.
+        let near = rpc.estimate_smart_fee(2).ok().flatten();
+        let far = rpc.estimate_smart_fee(144).ok().flatten();
+        let floor = rpc.get_mempool_floor().ok();
+        let estimate = resolve_fee_estimate(near, far, floor);
+
+        let congestion = estimate.map(|e| {
+            if e.reliable {
+                classify_mempool_congestion(e.sat_vb, &network).to_string()
+            } else {
+                // An unreliable figure must not drive a congestion verdict: we fell back to the
+                // floor precisely because there is no backlog to be congested by.
+                "low".to_string()
+            }
+        });
 
         MempoolStatus {
             available: true,
             mempool_tx_count: node.mempool_size,
-            fee_rate_sat_vb: fee_rate,
+            fee_rate_sat_vb: estimate.map(|e| e.sat_vb),
             congestion,
+            fee_estimate_reliable: estimate.map(|e| e.reliable).unwrap_or(false),
         }
     }
 
@@ -1545,6 +1561,72 @@ fn should_disarm(enabled: bool, armed_at_height: u64, real_height: u64) -> bool 
     enabled && real_height >= armed_at_height + 10
 }
 
+/// A mempool holding less than one block's worth of transactions has no backlog at all:
+/// whatever is in it goes into the next block, so nothing above the relay floor is required.
+const UNCONGESTED_VBYTES: u64 = 1_000_000;
+
+/// How far above the floor an estimate may sit before it stops being credible on an idle
+/// mempool. Generous: a real fee market can spike fast, and we only want to catch nonsense.
+const MAX_CREDIBLE_FLOOR_MULTIPLE: f64 = 20.0;
+
+/// What the fee estimator said, and whether we believe it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FeeEstimate {
+    pub sat_vb: f64,
+    /// False when the estimator's answer contradicts the observable mempool. The value is then
+    /// the floor, not the estimator's number.
+    pub reliable: bool,
+}
+
+/// Decide what fee rate to report.
+///
+/// Bitcoin Core's estimator learns from transactions it watched confirm. On a test network —
+/// erratic block production, occasional high-fee spam, long idle gaps — it produces values with
+/// no relation to what a transaction actually costs, and does NOT flag them via its `errors`
+/// field. Observed on testnet4: 361.7 sat/vB for every target while the mempool held 34 KB and
+/// the floor was 0.1 sat/vB.
+///
+/// Two independent checks, either of which discredits the estimate:
+/// - **A**: an idle mempool cannot justify a fee far above the relay floor.
+/// - **B**: a healthy estimator charges more for "next block" than for "within a day". An
+///   identical answer at both ends means it has no data to distinguish them.
+fn resolve_fee_estimate(
+    near_target: Option<f64>,
+    far_target: Option<f64>,
+    floor: Option<crate::rpc::client::MempoolFloor>,
+) -> Option<FeeEstimate> {
+    let floor_rate = floor.map(|f| f.min_fee_sat_vb.max(f.relay_floor_sat_vb));
+
+    let Some(estimate) = near_target else {
+        // No estimate at all: the floor is still a truthful answer, if we have it.
+        return floor_rate.map(|sat_vb| FeeEstimate { sat_vb, reliable: false });
+    };
+
+    // B — a flat curve across wildly different targets means the estimator is guessing.
+    let degenerate = match (near_target, far_target) {
+        (Some(n), Some(f)) => (n - f).abs() < f64::EPSILON,
+        _ => false,
+    };
+
+    // A — no backlog means no competition, so a large multiple of the floor is not credible.
+    let contradicted = match (floor, floor_rate) {
+        (Some(f), Some(rate)) if f.vbytes < UNCONGESTED_VBYTES && rate > 0.0 => {
+            estimate > rate * MAX_CREDIBLE_FLOOR_MULTIPLE
+        }
+        _ => false,
+    };
+
+    if degenerate || contradicted {
+        // Report the floor: on an idle mempool that is what a transaction actually needs.
+        return Some(FeeEstimate {
+            sat_vb: floor_rate.unwrap_or(estimate),
+            reliable: false,
+        });
+    }
+
+    Some(FeeEstimate { sat_vb: estimate, reliable: true })
+}
+
 fn classify_mempool_congestion(fee_sat_vb: f64, network: &str) -> &'static str {
     let (low_max, high_min) = match network {
         "mainnet" => (10.0, 50.0),
@@ -1650,6 +1732,80 @@ mod tests {
         let (pm, _dir) = test_manager();
         pm.cache_chain_tip(100, "aa".into());
         assert_eq!(pm.get_cached_chain_tip(), Some((100, "aa".to_string())));
+    }
+
+    fn floor(vbytes: u64, min: f64) -> crate::rpc::client::MempoolFloor {
+        crate::rpc::client::MempoolFloor {
+            vbytes,
+            min_fee_sat_vb: min,
+            relay_floor_sat_vb: min,
+        }
+    }
+
+    // The exact numbers observed on the testnet4 node: the estimator insisted on 361.7 sat/vB
+    // for every target while the mempool held 34 KB at a 0.1 sat/vB floor.
+    #[test]
+    fn the_observed_testnet4_nonsense_is_rejected() {
+        let est = resolve_fee_estimate(Some(361.659), Some(361.659), Some(floor(34_535, 0.1)))
+            .expect("an answer");
+        assert!(!est.reliable);
+        assert_eq!(est.sat_vb, 0.1, "should fall back to the floor, not the fantasy");
+    }
+
+    // B alone: a flat curve is not credible even if the mempool is busy.
+    #[test]
+    fn an_identical_estimate_at_both_targets_is_not_credible() {
+        let est = resolve_fee_estimate(Some(50.0), Some(50.0), Some(floor(5_000_000, 2.0)))
+            .expect("an answer");
+        assert!(!est.reliable);
+    }
+
+    // A alone: a plausible curve, but an idle mempool cannot cost 200x the floor.
+    #[test]
+    fn an_idle_mempool_cannot_justify_a_huge_fee() {
+        let est = resolve_fee_estimate(Some(200.0), Some(80.0), Some(floor(10_000, 1.0)))
+            .expect("an answer");
+        assert!(!est.reliable);
+        assert_eq!(est.sat_vb, 1.0);
+    }
+
+    // A real fee market must still be reported as-is: a descending curve on a full mempool.
+    #[test]
+    fn a_genuine_fee_market_is_trusted() {
+        let est = resolve_fee_estimate(Some(45.0), Some(12.0), Some(floor(80_000_000, 3.0)))
+            .expect("an answer");
+        assert!(est.reliable);
+        assert_eq!(est.sat_vb, 45.0);
+    }
+
+    // A modest fee on an idle mempool is normal and must not be flagged.
+    #[test]
+    fn a_small_fee_on_an_idle_mempool_is_trusted() {
+        let est = resolve_fee_estimate(Some(3.0), Some(1.5), Some(floor(20_000, 1.0)))
+            .expect("an answer");
+        assert!(est.reliable);
+        assert_eq!(est.sat_vb, 3.0);
+    }
+
+    // No estimate: the floor is still the truth, but we do not dress it up as an estimate.
+    #[test]
+    fn without_an_estimate_the_floor_is_reported_as_unreliable() {
+        let est = resolve_fee_estimate(None, None, Some(floor(20_000, 0.1))).expect("an answer");
+        assert!(!est.reliable);
+        assert_eq!(est.sat_vb, 0.1);
+    }
+
+    #[test]
+    fn without_an_estimate_or_a_floor_there_is_no_answer() {
+        assert_eq!(resolve_fee_estimate(None, None, None), None);
+    }
+
+    // Without mempool data we cannot apply either check, so the estimate stands.
+    #[test]
+    fn an_estimate_with_no_mempool_data_is_taken_at_face_value() {
+        let est = resolve_fee_estimate(Some(25.0), Some(9.0), None).expect("an answer");
+        assert!(est.reliable);
+        assert_eq!(est.sat_vb, 25.0);
     }
 
     // A data path that sees the indexer fail must demote it immediately, or every later call keeps

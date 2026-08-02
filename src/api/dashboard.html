@@ -1445,6 +1445,7 @@
                 cfg_liana_vb_approx: 'approx.',
                 cfg_scheduled_datetime: 'Scheduled Date & Time (optional)',
                 cfg_scheduled_hint: 'If set, overrides delay. Leave empty to use random delay hours',
+                mempool_fee_floor: '(floor \u2014 no reliable estimate)',
                 cfg_notif_title: 'Broadcast Notifications',
                 cfg_notif_enable: 'Notify me when a waiting transaction is broadcast',
                 cfg_notif_hint: 'Sends a private message the moment a retained transaction is redistributed to the network. Never affects broadcasting.',
@@ -1607,6 +1608,7 @@
                 cfg_liana_vb_approx: 'aprox.',
                 cfg_scheduled_datetime: 'Fecha y Hora Programada (opcional)',
                 cfg_scheduled_hint: 'Si se define, anula el retraso. Dejar vac\u00edo para usar horas aleatorias',
+                mempool_fee_floor: '(m\u00ednimo \u2014 sin estimaci\u00f3n fiable)',
                 cfg_notif_title: 'Avisos de difusi\u00f3n',
                 cfg_notif_enable: 'Av\u00edsame cuando se difunda una transacci\u00f3n en espera',
                 cfg_notif_hint: 'Env\u00eda un mensaje privado en el momento en que una transacci\u00f3n retenida se redistribuye a la red. Nunca afecta a la difusi\u00f3n.',
@@ -1991,7 +1993,10 @@
 
             const parts = [];
             if (data.fee_rate_sat_vb != null && !isNaN(data.fee_rate_sat_vb)) {
-                parts.push(data.fee_rate_sat_vb.toFixed(1) + ' sat/vB');
+                // When Core's estimator contradicted the mempool we show the relay floor
+                // instead, and say so rather than passing a fabricated number off as an estimate.
+                const suffix = data.fee_estimate_reliable === false ? ' ' + t('mempool_fee_floor') : '';
+                parts.push(data.fee_rate_sat_vb.toFixed(1) + ' sat/vB' + suffix);
             }
             if (data.mempool_tx_count != null) {
                 parts.push(data.mempool_tx_count.toLocaleString() + ' tx');

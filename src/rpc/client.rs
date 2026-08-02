@@ -81,6 +81,22 @@ impl BitcoinRpc {
         Ok(result.fee_rate.map(|rate| rate.to_btc() * 100_000.0))
     }
 
+    /// What it currently costs, at minimum, to get a transaction relayed and into a block:
+    /// the mempool's own minimum plus the relay floor, with the mempool's backlog size so
+    /// callers can tell a congested mempool from an idle one.
+    pub fn get_mempool_floor(&self) -> Result<MempoolFloor> {
+        let info = self
+            .client
+            .get_mempool_info()
+            .context("Failed to get mempool info")?;
+        Ok(MempoolFloor {
+            vbytes: info.bytes as u64,
+            // Both are BTC/kvB like estimatesmartfee, so the same conversion applies.
+            min_fee_sat_vb: info.mempool_min_fee.to_btc() * 100_000.0,
+            relay_floor_sat_vb: info.min_relay_tx_fee.to_btc() * 100_000.0,
+        })
+    }
+
     pub fn test_connection(&self) -> Result<bool> {
         self.client
             .get_blockchain_info()
@@ -133,4 +149,13 @@ impl BitcoinRpc {
             sync_pct,
         ))
     }
+}
+
+/// The floor below which a transaction will not be relayed, plus the current backlog.
+#[derive(Debug, Clone, Copy)]
+pub struct MempoolFloor {
+    /// Total virtual size of everything waiting. One block is ~1_000_000 vB.
+    pub vbytes: u64,
+    pub min_fee_sat_vb: f64,
+    pub relay_floor_sat_vb: f64,
 }
