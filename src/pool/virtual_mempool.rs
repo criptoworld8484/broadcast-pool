@@ -433,6 +433,48 @@ pub fn extract_affected_scripthashes_timed_with_lookup(
 mod tests {
     use super::*;
 
+    fn entry(txid: &str, height: i64) -> serde_json::Value {
+        serde_json::json!({ "tx_hash": txid, "height": height })
+    }
+
+    // The bug that left transactions "unconfirmed" in Sparrow: the pushed status was hashed
+    // over an EMPTY history, so confirming a tx produced the same value the wallet already
+    // had. No change means no re-query, and the wallet keeps showing the old state.
+    #[test]
+    fn status_changes_when_a_tx_moves_from_mempool_into_a_block() {
+        let txid = "aa".repeat(32);
+        let sh = "bb".repeat(32);
+
+        let in_mempool = compute_modified_status_hash(vec![entry(&txid, 0)], &sh, &[]);
+        let in_block = compute_modified_status_hash(vec![entry(&txid, 146_694)], &sh, &[]);
+
+        assert!(in_mempool.is_some() && in_block.is_some());
+        assert_ne!(
+            in_mempool, in_block,
+            "confirming must change the status, or the wallet never re-queries"
+        );
+    }
+
+    // Hashing an empty history is what made confirmation invisible: two different real states
+    // collapse to the same answer.
+    #[test]
+    fn an_empty_history_hides_the_difference() {
+        let sh = "bb".repeat(32);
+        assert_eq!(
+            compute_modified_status_hash(vec![], &sh, &[]),
+            compute_modified_status_hash(vec![], &sh, &[])
+        );
+        assert_eq!(compute_modified_status_hash(vec![], &sh, &[]), None);
+    }
+
+    // A scripthash with no history at all must yield None so the caller can send null, which is
+    // what Electrum uses for "nothing here" — not an empty string.
+    #[test]
+    fn no_history_and_no_pending_is_none() {
+        let sh = "bb".repeat(32);
+        assert_eq!(compute_modified_status_hash(vec![], &sh, &[]), None);
+    }
+
     #[test]
     fn test_compute_scripthash() {
         use bitcoin::ScriptBuf;

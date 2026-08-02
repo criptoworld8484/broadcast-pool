@@ -904,6 +904,33 @@ fn parse_headers_subscribe_result(msg: &serde_json::Value) -> Option<(u64, Strin
     Some((height, hex.to_string()))
 }
 
+/// The scripthash's confirmed/mempool history as the indexer sees it.
+///
+/// The status pushed to a wallet must be a hash of the REAL history plus whatever we are
+/// holding virtually. Computing it over an empty history — as every call site used to — yields
+/// a value that happens to differ from the wallet's most of the time, which is why it worked at
+/// all; when it does not differ (an empty status pushed twice), the wallet sees no change and
+/// never re-queries, so a confirmed transaction stays "unconfirmed" until reconnect.
+fn fetch_scripthash_history(indexer_url: &str, scripthash: &str) -> Vec<serde_json::Value> {
+    if indexer_url.is_empty() {
+        return Vec::new();
+    }
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "blockchain.scripthash.get_history",
+        "params": [scripthash],
+        "id": 0
+    });
+    let Some(resp) = forward_to_indexer_sync(&req.to_string(), indexer_url) else {
+        tracing::debug!("Could not read history for scripthash {}", &scripthash[..scripthash.len().min(16)]);
+        return Vec::new();
+    };
+    serde_json::from_str::<serde_json::Value>(resp.trim())
+        .ok()
+        .and_then(|m| m.get("result").and_then(|r| r.as_array().cloned()))
+        .unwrap_or_default()
+}
+
 pub fn refresh_chain_tip_cache(indexer_url: &str, pool_manager: &PoolManager) {
     if indexer_url.is_empty() {
         return;
@@ -2217,22 +2244,26 @@ async fn handle_connection(
                         &indexer_url,
                         Some(&session),
                     );
-                    // Always send notification — even with empty pending list — so Sparrow
-                    // learns the tx left the virtual mempool (status hash changes).
-                    let hash = if pending.is_empty() {
-                        // Empty status hash = no unconfirmed txs for this scripthash.
-                        String::new()
-                    } else {
-                        pending::compute_modified_status_hash(vec![], &notification.scripthash, &pending)
-                            .unwrap_or_default()
-                    };
-                    // Always send notification — even with empty pending list — so Sparrow
-                    // learns the tx left the virtual mempool (status hash changes).
-                    let status_value = if pending.is_empty() {
-                        // Empty string = no unconfirmed txs. Sparrow must re-query.
-                        serde_json::Value::String(String::new())
-                    } else {
-                        serde_json::Value::String(hash)
+                    // The status must hash the indexer's real history plus anything we hold
+                    // virtually. Hashing an empty history instead meant a confirmation pushed
+                    // the same empty status the wallet already had — no change, no re-query,
+                    // and the transaction stayed "unconfirmed" until a reconnect.
+                    let sh_for_fetch = notification.scripthash.clone();
+                    let url_for_fetch = indexer_url.clone();
+                    let real_history = tokio::task::spawn_blocking(move || {
+                        fetch_scripthash_history(&url_for_fetch, &sh_for_fetch)
+                    })
+                    .await
+                    .unwrap_or_default();
+
+                    let status_value = match pending::compute_modified_status_hash(
+                        real_history,
+                        &notification.scripthash,
+                        &pending,
+                    ) {
+                        Some(hash) => serde_json::Value::String(hash),
+                        // Electrum uses null, not "", for a scripthash with no history at all.
+                        None => serde_json::Value::Null,
                     };
                     let notification_json = serde_json::json!({
                         "jsonrpc": "2.0",
