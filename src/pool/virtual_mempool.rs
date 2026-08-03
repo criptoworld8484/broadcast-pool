@@ -268,6 +268,26 @@ fn fetch_prev_tx(txid_str: &str, indexer_addr: &str) -> Result<Transaction> {
     Transaction::consensus_decode(&mut cursor).context("Failed to decode prev tx from indexer")
 }
 
+/// Whether any input carries no authorisation at all — no scriptSig and no witness.
+///
+/// Such a transaction can never be broadcast: the network rejects it outright. Sparrow shows a
+/// transaction's hex throughout the signing flow, so copying it a step early yields exactly
+/// this skeleton, and without a check the problem only surfaces as an opaque node rejection
+/// several actions later.
+///
+/// A useful tell, though not the check itself: for a signed segwit transaction txid != wtxid,
+/// while an unsigned one has no witness bytes at all and the two are equal.
+pub fn is_unsigned(tx_hex: &str) -> Result<bool> {
+    let tx = decode_tx(tx_hex)?;
+    if tx.input.is_empty() {
+        return Ok(false);
+    }
+    Ok(tx
+        .input
+        .iter()
+        .any(|i| i.script_sig.is_empty() && i.witness.is_empty()))
+}
+
 pub fn extract_output_scripthashes(tx_hex: &str) -> Result<Vec<String>> {
     let tx = decode_tx(tx_hex)?;
     Ok(tx
@@ -432,6 +452,75 @@ pub fn extract_affected_scripthashes_timed_with_lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact hex a user imported from Sparrow, copied one step before signing: two Taproot
+    /// inputs with no scriptSig and no witness. Bitcoin Core rejected it with
+    /// "Witness program was passed an empty witness", and its txid equals its wtxid.
+    const UNSIGNED_TAPROOT_TX: &str = "0200000002b37cfda06a0c6e276978d6132c4d94e05f67a909fb4164f90ad6b3c73ae3c92e0000000000fdffffffcc816e28c26f9c7bdaee285bf00e6787bfc2f373985ab0d78fab0644cecfecd2010000000006000000027d96010000000000225120b15312ac08172d9ddc80f409a6d9a246aa88bd4237b4070c0cf253ec7ccfbd37e604000000000000225120408e72dcffb91580d474a42fc8ac07c4d58b813383784b4d37202afea590410d00000000";
+
+    #[test]
+    fn a_transaction_copied_before_signing_is_detected() {
+        assert_eq!(is_unsigned(UNSIGNED_TAPROOT_TX).unwrap(), true);
+    }
+
+    #[test]
+    fn a_signed_segwit_transaction_is_accepted() {
+        use bitcoin::consensus::Encodable;
+        use bitcoin::{absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf,
+                      Sequence, Transaction, TxIn, TxOut, Witness};
+
+        let mut witness = Witness::new();
+        witness.push(vec![0xab; 64]); // a Schnorr signature is 64 bytes
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness,
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: ScriptBuf::from_hex("0014d952c2c0d09d4ef2e1e3f0a1e3e5c8f2d4b6a7c8").unwrap(),
+            }],
+        };
+        let mut raw = Vec::new();
+        tx.consensus_encode(&mut raw).unwrap();
+        assert_eq!(is_unsigned(&hex::encode(raw)).unwrap(), false);
+    }
+
+    // Legacy inputs authorise through scriptSig and carry no witness at all — they must not be
+    // mistaken for unsigned.
+    #[test]
+    fn a_signed_legacy_transaction_is_accepted() {
+        use bitcoin::consensus::Encodable;
+        use bitcoin::{absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf,
+                      Sequence, Transaction, TxIn, TxOut, Witness};
+
+        let tx = Transaction {
+            version: Version::ONE,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_hex("47304402").unwrap(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: ScriptBuf::from_hex("0014d952c2c0d09d4ef2e1e3f0a1e3e5c8f2d4b6a7c8").unwrap(),
+            }],
+        };
+        let mut raw = Vec::new();
+        tx.consensus_encode(&mut raw).unwrap();
+        assert_eq!(is_unsigned(&hex::encode(raw)).unwrap(), false);
+    }
+
+    #[test]
+    fn undecodable_hex_is_an_error_not_a_verdict() {
+        assert!(is_unsigned("not-hex").is_err());
+    }
 
     fn entry(txid: &str, height: i64) -> serde_json::Value {
         serde_json::json!({ "tx_hash": txid, "height": height })

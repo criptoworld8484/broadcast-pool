@@ -317,6 +317,27 @@ async fn import_transaction(
         .network.network_type.data_dir_name()
         .to_string();
 
+    // Refuse what can never be broadcast. Copying a transaction's hex from a wallet before
+    // the signature is applied yields a valid-looking skeleton with empty inputs; without this
+    // it imports cleanly and only fails later, as an opaque rejection from the node.
+    match crate::pool::virtual_mempool::is_unsigned(&req.tx_hex) {
+        Ok(true) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "This transaction is not signed — its inputs carry no signature, so the network \
+                 would reject it. Copy the final hex from your wallet after signing."
+                    .to_string(),
+            ))
+        }
+        Ok(false) => {}
+        Err(e) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Could not decode this transaction: {}", e),
+            ))
+        }
+    }
+
     let new_tx = NewBroadcastTx {
         tx_hex: req.tx_hex,
         network: req.network.unwrap_or(network),
@@ -449,7 +470,11 @@ async fn broadcast_now(
     let txid = tokio::task::spawn_blocking(move || pool_manager.broadcast_now(&id))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {}", e)))?
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        // `{:#}` walks the whole anyhow chain. Plain `to_string()` returns only the outermost
+        // context ("Failed to broadcast transaction") and drops the node's actual reason —
+        // "insufficient fee, rejecting replacement", "empty witness" — which is the only part
+        // the user can act on.
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{:#}", e)))?;
     Ok(Json(serde_json::json!({ "ok": true, "txid": txid })))
 }
 
