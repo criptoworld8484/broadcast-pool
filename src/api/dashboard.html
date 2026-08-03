@@ -839,6 +839,14 @@
         }
 
         .toast.show { transform: translateY(0); opacity: 1; }
+        /* Red, and wide enough for a node's rejection reason, which is the actionable part. */
+        .toast.toast-error {
+            background: var(--red);
+            color: #fff;
+            max-width: 640px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
 
         .page { display: none; }
         .page.active { display: block; }
@@ -1850,11 +1858,14 @@
             if (name === 'archive') refresh();
         }
 
-        function toast(msg) {
+        function toast(msg, isError) {
             const t = document.getElementById('toast');
             t.textContent = msg;
+            // Errors used to appear in the same green as "settings saved", so a failure read as
+            // a success at a glance. Errors also linger, since they carry something to act on.
+            t.classList.toggle('toast-error', !!isError);
             t.classList.add('show');
-            setTimeout(() => t.classList.remove('show'), 3000);
+            setTimeout(() => t.classList.remove('show'), isError ? 7000 : 3000);
         }
 
         function copyText(text) {
@@ -2140,17 +2151,28 @@
             const tx = allTxs.find(t => t.id === id);
             const label = tx && tx.txid ? tx.txid.slice(0, 12) + '…' : id;
             if (!confirm(t('bn_confirm').replace('{tx}', label))) return;
+
+            let sent = false;
             try {
                 const res = await fetch(`/api/transactions/${id}/broadcast-now`, { method: 'POST' });
                 if (res.ok) {
+                    sent = true;
                     toast(t('bn_sent'));
-                    await loadTransactions();
                 } else {
-                    // The backend explains exactly why (non-final, safe mode, no chain clock).
-                    toast(await res.text());
+                    // The backend explains exactly why (non-final, safe mode, no chain clock,
+                    // or the node's own rejection reason).
+                    toast(await res.text(), true);
                 }
             } catch (e) {
-                toast(String(e));
+                toast(String(e), true);
+            }
+
+            // Refreshing is cosmetic and must stay outside the try above: a broadcast that
+            // succeeded must never be reported as failed because redrawing the table threw.
+            // That is exactly what happened when this called a function that did not exist —
+            // the transaction went out and the user was shown a ReferenceError.
+            if (sent) {
+                try { await refresh(); } catch (e) { console.error('refresh after broadcast', e); }
             }
         }
 
@@ -2526,7 +2548,7 @@
                         <td>${sourceCell(tx)}</td>
                         <td><span class="status status-${statusInfo.cls}">${statusInfo.label}</span></td>
                         <td><span class="status ${typeClass}">${typeLabel}</span></td>
-                        <td class="time">${formatPriceTrigger(tx)}${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + schedLabel + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}${(tx.broadcast_mode === 'scheduled' || isUserScheduledMode(tx.broadcast_mode)) && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}${tx.locktime_deferred && tx.original_scheduled_time ? '<br><span style="font-size: 10px; color: #FF8E8E;">' + t('detail_original_scheduled') + ': ' + new Date(tx.original_scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}) + '</span>' : ''}${showMtpRemaining(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">MTP: ' + formatRemaining(tx.locktime_remaining_secs) + '</span>' : ''}${broadcastBlockedReason(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">' + broadcastBlockedReason(tx) + '</span>' : ''}${isUserScheduledMode(tx.broadcast_mode) && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}${tx.broadcast_mode === 'immediate' || (!tx.scheduled_time && tx.broadcast_mode !== 'by_block' && !isUserScheduledMode(tx.broadcast_mode) && tx.schedule_trigger !== 'price') ? '<span style="color: var(--text-dim);">-</span>' : ''}</td>
+                        <td class="time">${formatPriceTrigger(tx)}${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + schedLabel + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}${(tx.broadcast_mode === 'scheduled' || isUserScheduledMode(tx.broadcast_mode)) && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}${tx.locktime_deferred && tx.original_scheduled_time ? '<br><span style="font-size: 10px; color: #FF8E8E;">' + t('detail_original_scheduled') + ': ' + new Date(tx.original_scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit'}) + '</span>' : ''}${showMtpRemaining(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">MTP: ' + formatRemaining(tx.locktime_remaining_secs) + '</span>' : ''}${broadcastBlockedReason(tx) ? '<br><span style="font-size: 10px; color: #B8A9FF;">' + broadcastBlockedReason(tx) + '</span>' : ''}${isUserScheduledMode(tx.broadcast_mode) && !tx.scheduled_time && tx.schedule_trigger !== 'price' && tx.status !== 'broadcast' && tx.status !== 'confirmed' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}${tx.broadcast_mode === 'immediate' || (!tx.scheduled_time && tx.broadcast_mode !== 'by_block' && !isUserScheduledMode(tx.broadcast_mode) && tx.schedule_trigger !== 'price') ? '<span style="color: var(--text-dim);">-</span>' : ''}</td>
                         <td class="actions">
                             <button class="btn btn-sm btn-outline" onclick="showDetail('${tx.id}')" title="${t('btn_view_details')}">&#128065;</button>
                             ${shouldShowReschedule(tx) ? `<button class="btn btn-sm" onclick="reschedule('${tx.id}')">${t('btn_reschedule')}</button>` : ''}
@@ -2582,7 +2604,7 @@
                         ${tx.schedule_trigger === 'price' && tx.target_price ? '<span style="color: var(--green);">' + t('sch_tab_price') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + (tx.price_condition === 'below' ? '\u2264' : '\u2265') + ' ' + tx.target_price.toLocaleString() + ' ' + (tx.price_currency || 'usd').toUpperCase() + (tx.current_btc_price ? ' (' + t('sch_price_now') + ': ' + tx.current_btc_price.toLocaleString() + ')' : '') + '</span>' : ''}
                         ${tx.broadcast_mode === 'by_block' && tx.nlocktime > 0 ? '<span style="color: var(--btc);">' + t('detail_scheduled_label') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 Block #' + tx.nlocktime + '</span>' : ''}
                         ${(tx.broadcast_mode === 'scheduled' || isUserScheduledMode(tx.broadcast_mode)) && tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: var(--amber);">' + t('sch_tab_datetime') + '</span> <span style="font-size: 11px; color: var(--text-dim);">\u2014 ' + new Date(tx.scheduled_time).toLocaleString('es-ES', {hour:'2-digit', minute:'2-digit', day:'2-digit', month:'2-digit', year:'numeric'}) + '</span>' : ''}
-                        ${isUserScheduledMode(tx.broadcast_mode) && !tx.scheduled_time && tx.schedule_trigger !== 'price' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}
+                        ${isUserScheduledMode(tx.broadcast_mode) && !tx.scheduled_time && tx.schedule_trigger !== 'price' && tx.status !== 'broadcast' && tx.status !== 'confirmed' ? '<span style="color: #B8A9FF;">' + t('detail_manual_waiting') + '</span>' : ''}
                         ${tx.broadcast_mode === 'immediate' ? '<span style="color: var(--text-dim);">' + t('detail_immediate_label') + '</span>' : ''}
                     </span>
                 </div>
