@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/transactions/{id}", get(get_transaction))
         .route("/api/transactions/{id}/remove", post(remove_transaction))
         .route("/api/transactions/{id}/retry", post(retry_transaction))
+        .route("/api/transactions/{id}/broadcast-now", post(broadcast_now))
         .route("/api/status", get(get_status))
         .route("/api/security/acknowledge", post(security_acknowledge))
         .route("/api/config", get(get_config))
@@ -436,6 +437,20 @@ async fn retry_transaction(
         .retry_failed_transaction(&id)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+/// Force a broadcast now, overriding any app-level schedule. Refuses (400) when the
+/// transaction's own nLockTime is not reached — the network would reject it as non-final.
+async fn broadcast_now(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool_manager = state.pool_manager.clone();
+    let txid = tokio::task::spawn_blocking(move || pool_manager.broadcast_now(&id))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {}", e)))?
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "ok": true, "txid": txid })))
 }
 
 #[derive(serde::Serialize)]
