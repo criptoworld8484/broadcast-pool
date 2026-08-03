@@ -2275,9 +2275,13 @@ async fn handle_connection(
                         out.push(b'\n');
                         if client_stream.write_all(&out).await.is_ok() {
                             let _ = client_stream.flush().await;
+                            // The status value is the whole point of the push: a wallet only
+                            // re-queries when it changes. Logging it makes "the push arrived but
+                            // nothing happened" diagnosable instead of guesswork.
                             tracing::info!(
-                                "Push notification for scripthash {} ({} pending) to {}",
+                                "Push notification for scripthash {} (status={}, {} pending) to {}",
                                 &notification.scripthash[..notification.scripthash.len().min(16)],
+                                status_value.as_str().map(|h| &h[..h.len().min(16)]).unwrap_or("null"),
                                 pending.len(),
                                 peer_addr
                             );
