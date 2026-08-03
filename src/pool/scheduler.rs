@@ -276,8 +276,18 @@ impl Scheduler {
             sleep(HEALTH_POLL_INTERVAL).await;
 
             let pool_manager = self.pool_manager.clone();
-            if let Err(e) =
-                tokio::task::spawn_blocking(move || pool_manager.refresh_chain_health()).await
+            let config = self.config.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                pool_manager.refresh_chain_health();
+                // Keep the tip served to wallets fresh. Without this the cache only ever moved
+                // when a wallet itself asked for headers — and since that request is answered
+                // from cache *before* the refresh lands, the wallet always got the previous
+                // value. Observed 71 blocks (~12h) stale in the field.
+                let indexer_url =
+                    crate::electrum_server::resolve_live_indexer_url(&pool_manager, &config);
+                crate::electrum_server::refresh_chain_tip_cache(&indexer_url, &pool_manager);
+            })
+            .await
             {
                 tracing::error!("Chain health poller task failed: {}", e);
             }

@@ -222,6 +222,10 @@ pub struct MempoolStatus {
     pub fee_rate_sat_vb: Option<f64>,
     /// `low`, `medium`, or `high` when fee data is available.
     pub congestion: Option<String>,
+    /// False when Bitcoin Core's estimator contradicted the observable mempool and the figure
+    /// shown is the relay floor instead. Test networks produce nonsense here routinely.
+    #[serde(default)]
+    pub fee_estimate_reliable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

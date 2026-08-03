@@ -389,6 +389,9 @@ struct SessionState {
     saw_server_version: bool,
     /// Client name from `server.version` params (e.g. "Sparrow 2.x"), when sent.
     wallet_label: Option<String>,
+    /// Whether this session issued `blockchain.headers.subscribe`. The Electrum protocol only
+    /// allows pushing header notifications after that, and an unsolicited one confuses clients.
+    subscribed_headers: bool,
 }
 
 impl SessionState {
@@ -403,6 +406,7 @@ impl SessionState {
             rpc_lines_handled: 0,
             saw_server_version: false,
             wallet_label: None,
+            subscribed_headers: false,
         }
     }
 
@@ -751,7 +755,7 @@ fn line_is_batch(line: &str) -> bool {
 }
 
 /// Prefer live pool indexer URL (healed after Umbrel startup) over session snapshot.
-fn resolve_live_indexer_url(pool_manager: &PoolManager, config: &Arc<Mutex<Config>>) -> String {
+pub fn resolve_live_indexer_url(pool_manager: &PoolManager, config: &Arc<Mutex<Config>>) -> String {
     if let Some(url) = pool_manager.get_indexer_url() {
         if !url.is_empty() {
             return url;
@@ -900,7 +904,34 @@ fn parse_headers_subscribe_result(msg: &serde_json::Value) -> Option<(u64, Strin
     Some((height, hex.to_string()))
 }
 
-fn refresh_chain_tip_cache(indexer_url: &str, pool_manager: &PoolManager) {
+/// The scripthash's confirmed/mempool history as the indexer sees it.
+///
+/// The status pushed to a wallet must be a hash of the REAL history plus whatever we are
+/// holding virtually. Computing it over an empty history — as every call site used to — yields
+/// a value that happens to differ from the wallet's most of the time, which is why it worked at
+/// all; when it does not differ (an empty status pushed twice), the wallet sees no change and
+/// never re-queries, so a confirmed transaction stays "unconfirmed" until reconnect.
+fn fetch_scripthash_history(indexer_url: &str, scripthash: &str) -> Vec<serde_json::Value> {
+    if indexer_url.is_empty() {
+        return Vec::new();
+    }
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "blockchain.scripthash.get_history",
+        "params": [scripthash],
+        "id": 0
+    });
+    let Some(resp) = forward_to_indexer_sync(&req.to_string(), indexer_url) else {
+        tracing::debug!("Could not read history for scripthash {}", &scripthash[..scripthash.len().min(16)]);
+        return Vec::new();
+    };
+    serde_json::from_str::<serde_json::Value>(resp.trim())
+        .ok()
+        .and_then(|m| m.get("result").and_then(|r| r.as_array().cloned()))
+        .unwrap_or_default()
+}
+
+pub fn refresh_chain_tip_cache(indexer_url: &str, pool_manager: &PoolManager) {
     if indexer_url.is_empty() {
         return;
     }
@@ -1275,6 +1306,7 @@ async fn handle_one_subrequest(
     }
 
     if request.method == "blockchain.headers.subscribe" {
+        session.subscribed_headers = true;
         let vtip = {
             let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
             let is_liana = session.effective_source(source_label) == "liana";
@@ -1877,6 +1909,10 @@ async fn process_client_line(
     // served instead of the real cached tip.
     if let Ok(reqs) = parse_subrequests(line_str) {
         if reqs.len() == 1 && reqs[0].method == "blockchain.headers.subscribe" {
+            // The client subscribed, whichever path answers it. This fast path returns early,
+            // so without marking it here a session served from the warm cache — which is every
+            // Sparrow session — would never receive a header push.
+            session.subscribed_headers = true;
             let is_liana = session.effective_source(source_label) == "liana";
             let use_instant_cache = {
                 let cfg = config.lock().map_err(|e| anyhow::anyhow!("Config lock: {}", e))?;
@@ -2096,6 +2132,7 @@ async fn handle_connection(
     let mut client_buf = Vec::new();
     let mut session = SessionState::new();
     let mut scripthash_rx = pool_manager.subscribe_scripthash_changes();
+    let mut chain_tip_rx = pool_manager.subscribe_chain_tip();
 
     client_stream.set_nodelay(true)?;
 
@@ -2138,6 +2175,56 @@ async fn handle_connection(
                     }
                 }
             }
+            Ok(tip) = chain_tip_rx.recv() => {
+                // The Electrum protocol requires the server to push every new tip to header
+                // subscribers. Without this a wallet keeps the height it got when it subscribed:
+                // nLockTime is stamped with a stale height and confirmations (tip - tx_height + 1)
+                // never advance, which only a reconnect used to fix.
+                if session.subscribed_headers && !session.client_busy {
+                    // An armed Liana session lives on a fabricated tip ABOVE the real one; pushing
+                    // the real height would make its chain appear to go backwards and expose the
+                    // fiction. Re-fabricate at the same offset instead.
+                    let vtip = {
+                        match config.lock() {
+                            Ok(cfg) => {
+                                let is_liana = session.effective_source(source_label) == "liana";
+                                virtual_tip_height(&cfg, is_liana)
+                            }
+                            Err(_) => None,
+                        }
+                    };
+                    let pushed = match vtip {
+                        Some(v) => {
+                            let up_to = v.max(tip.height + 1);
+                            match virtual_headers::header_hex_at(tip.height, &tip.hex, up_to) {
+                                Ok(Some(hex)) => Some((up_to, hex)),
+                                _ => None,
+                            }
+                        }
+                        None => Some((tip.height, tip.hex.clone())),
+                    };
+                    if let Some((height, hex)) = pushed {
+                        let notification_json = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "blockchain.headers.subscribe",
+                            "params": [{ "height": height, "hex": hex }]
+                        });
+                        if let Ok(payload) = serde_json::to_vec(&notification_json) {
+                            let mut out = payload;
+                            out.push(b'\n');
+                            if client_stream.write_all(&out).await.is_ok() {
+                                let _ = client_stream.flush().await;
+                                tracing::info!(
+                                    "Pushed new chain tip height={} to {} [{}]",
+                                    height,
+                                    peer_addr,
+                                    source_label
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             Ok(notification) = scripthash_rx.recv() => {
                 // Clear stale recent_broadcast_txid if the tx was already broadcast.
                 if let Some(ref txid) = session.recent_broadcast_txid {
@@ -2157,22 +2244,26 @@ async fn handle_connection(
                         &indexer_url,
                         Some(&session),
                     );
-                    // Always send notification — even with empty pending list — so Sparrow
-                    // learns the tx left the virtual mempool (status hash changes).
-                    let hash = if pending.is_empty() {
-                        // Empty status hash = no unconfirmed txs for this scripthash.
-                        String::new()
-                    } else {
-                        pending::compute_modified_status_hash(vec![], &notification.scripthash, &pending)
-                            .unwrap_or_default()
-                    };
-                    // Always send notification — even with empty pending list — so Sparrow
-                    // learns the tx left the virtual mempool (status hash changes).
-                    let status_value = if pending.is_empty() {
-                        // Empty string = no unconfirmed txs. Sparrow must re-query.
-                        serde_json::Value::String(String::new())
-                    } else {
-                        serde_json::Value::String(hash)
+                    // The status must hash the indexer's real history plus anything we hold
+                    // virtually. Hashing an empty history instead meant a confirmation pushed
+                    // the same empty status the wallet already had — no change, no re-query,
+                    // and the transaction stayed "unconfirmed" until a reconnect.
+                    let sh_for_fetch = notification.scripthash.clone();
+                    let url_for_fetch = indexer_url.clone();
+                    let real_history = tokio::task::spawn_blocking(move || {
+                        fetch_scripthash_history(&url_for_fetch, &sh_for_fetch)
+                    })
+                    .await
+                    .unwrap_or_default();
+
+                    let status_value = match pending::compute_modified_status_hash(
+                        real_history,
+                        &notification.scripthash,
+                        &pending,
+                    ) {
+                        Some(hash) => serde_json::Value::String(hash),
+                        // Electrum uses null, not "", for a scripthash with no history at all.
+                        None => serde_json::Value::Null,
                     };
                     let notification_json = serde_json::json!({
                         "jsonrpc": "2.0",
@@ -2184,9 +2275,13 @@ async fn handle_connection(
                         out.push(b'\n');
                         if client_stream.write_all(&out).await.is_ok() {
                             let _ = client_stream.flush().await;
+                            // The status value is the whole point of the push: a wallet only
+                            // re-queries when it changes. Logging it makes "the push arrived but
+                            // nothing happened" diagnosable instead of guesswork.
                             tracing::info!(
-                                "Push notification for scripthash {} ({} pending) to {}",
+                                "Push notification for scripthash {} (status={}, {} pending) to {}",
                                 &notification.scripthash[..notification.scripthash.len().min(16)],
+                                status_value.as_str().map(|h| &h[..h.len().min(16)]).unwrap_or("null"),
                                 pending.len(),
                                 peer_addr
                             );

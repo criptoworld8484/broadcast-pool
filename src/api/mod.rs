@@ -218,6 +218,7 @@ async fn get_mempool_status(
             mempool_tx_count: None,
             fee_rate_sat_vb: None,
             congestion: None,
+            fee_estimate_reliable: false,
         });
     Json(status)
 }

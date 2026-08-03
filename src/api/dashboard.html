@@ -22,6 +22,7 @@
             --red: #FF4757;
             --amber: #FFB347;
             --blue: #4ECDC4;
+            --broadcast: #5AA9FF;
             --liana-green: #00FF68;
             --liana-green-dim: #00FF6822;
             --font-mono: 'JetBrains Mono', monospace;
@@ -183,7 +184,7 @@
         .stat-card:hover { background: var(--bg-card-hover); transform: translateY(-2px); }
         .stat-card.pending::before { background: var(--red); }
         .stat-card.scheduled::before { background: var(--amber); }
-        .stat-card.broadcast::before { background: var(--blue); }
+        .stat-card.broadcast::before { background: var(--broadcast); }
         .stat-card.confirmed::before { background: var(--green); }
         .stat-card.total::before { background: var(--btc); }
 
@@ -199,7 +200,7 @@
         .stat-card .value { font-family: var(--font-mono); font-size: 52px; font-weight: 700; line-height: 1; }
         .stat-card.pending .value { color: var(--red); }
         .stat-card.scheduled .value { color: var(--amber); }
-        .stat-card.broadcast .value { color: var(--blue); }
+        .stat-card.broadcast .value { color: var(--broadcast); }
         .stat-card.confirmed .value { color: var(--green); }
         .stat-card.total .value { color: var(--btc); }
         .stat-card.price::before { background: var(--btc); }
@@ -402,7 +403,11 @@
         .status-scheduled { background: #FFB34722; color: var(--amber); }
         .status-waiting-locktime { background: #7B68EE22; color: #B8A9FF; }
         .status-deferred-mtp { background: #FF6B6B22; color: #FF8E8E; }
-        .status-broadcast { background: #4ECDC422; color: var(--blue); }
+        /* Broadcast and confirmed used to be teal and green — neighbouring hues, so the
+           transition that matters most was the one you noticed least. Blue vs green reads as
+           "in flight" vs "settled" at a glance. --blue stays as it is for the immediate type
+           and the stat card, which are not competing with green in the same column. */
+        .status-broadcast { background: #3D8BFD22; color: var(--broadcast); font-weight: 700; }
         .status-confirmed { background: #00D97E22; color: var(--green); }
         .status-failed { background: #8A8A9522; color: var(--text-dim); }
 
@@ -1445,6 +1450,10 @@
                 cfg_liana_vb_approx: 'approx.',
                 cfg_scheduled_datetime: 'Scheduled Date & Time (optional)',
                 cfg_scheduled_hint: 'If set, overrides delay. Leave empty to use random delay hours',
+                toast_copy_failed: 'Could not copy \u2014 select the text manually.',
+                mempool_fee_floor: '(floor \u2014 no reliable estimate)',
+                mtp_label: 'MTP (time-lock clock)',
+                mtp_tooltip: 'Median Time Past: the median timestamp of the last 11 blocks. The network validates a date-based nLockTime against this, not against the latest block\u2019s own timestamp, so it always trails what your wallet shows for that block.',
                 cfg_notif_title: 'Broadcast Notifications',
                 cfg_notif_enable: 'Notify me when a waiting transaction is broadcast',
                 cfg_notif_hint: 'Sends a private message the moment a retained transaction is redistributed to the network. Never affects broadcasting.',
@@ -1607,6 +1616,10 @@
                 cfg_liana_vb_approx: 'aprox.',
                 cfg_scheduled_datetime: 'Fecha y Hora Programada (opcional)',
                 cfg_scheduled_hint: 'Si se define, anula el retraso. Dejar vac\u00edo para usar horas aleatorias',
+                toast_copy_failed: 'No se pudo copiar \u2014 selecciona el texto a mano.',
+                mempool_fee_floor: '(m\u00ednimo \u2014 sin estimaci\u00f3n fiable)',
+                mtp_label: 'MTP (reloj de bloqueos)',
+                mtp_tooltip: 'Median Time Past: la mediana de las marcas de tiempo de los 11 \u00faltimos bloques. La red valida contra este valor un nLockTime por fecha, no contra la hora del \u00faltimo bloque, por lo que siempre va por detr\u00e1s de la que muestra tu cartera para ese bloque.',
                 cfg_notif_title: 'Avisos de difusi\u00f3n',
                 cfg_notif_enable: 'Av\u00edsame cuando se difunda una transacci\u00f3n en espera',
                 cfg_notif_hint: 'Env\u00eda un mensaje privado en el momento en que una transacci\u00f3n retenida se redistribuye a la red. Nunca afecta a la difusi\u00f3n.',
@@ -1831,15 +1844,32 @@
         }
 
         function copyText(text) {
-            navigator.clipboard.writeText(text).then(() => toast(t('toast_copied'))).catch(() => {
+            // navigator.clipboard only exists in a secure context. This dashboard is served over
+            // plain HTTP on a LAN IP, so it is undefined and `navigator.clipboard.writeText`
+            // threw a synchronous TypeError — which .catch() never sees, so the fallback below
+            // never ran and copying silently did nothing.
+            const fallback = () => {
                 const ta = document.createElement('textarea');
                 ta.value = text;
+                // Keep it off-screen but selectable; a hidden element cannot be copied from.
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'fixed';
+                ta.style.top = '-1000px';
+                ta.style.opacity = '0';
                 document.body.appendChild(ta);
                 ta.select();
-                document.execCommand('copy');
+                ta.setSelectionRange(0, ta.value.length);
+                let ok = false;
+                try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
                 document.body.removeChild(ta);
-                toast(t('toast_copied'));
-            });
+                toast(ok ? t('toast_copied') : t('toast_copy_failed'));
+            };
+
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(() => toast(t('toast_copied'))).catch(fallback);
+            } else {
+                fallback();
+            }
         }
 
         const NETWORK_LABELS = {
@@ -1991,7 +2021,10 @@
 
             const parts = [];
             if (data.fee_rate_sat_vb != null && !isNaN(data.fee_rate_sat_vb)) {
-                parts.push(data.fee_rate_sat_vb.toFixed(1) + ' sat/vB');
+                // When Core's estimator contradicted the mempool we show the relay floor
+                // instead, and say so rather than passing a fabricated number off as an estimate.
+                const suffix = data.fee_estimate_reliable === false ? ' ' + t('mempool_fee_floor') : '';
+                parts.push(data.fee_rate_sat_vb.toFixed(1) + ' sat/vB' + suffix);
             }
             if (data.mempool_tx_count != null) {
                 parts.push(data.mempool_tx_count.toLocaleString() + ' tx');
@@ -2987,7 +3020,13 @@
                     if (status.chain_height) {
                         let heightText = `Block height: ${status.chain_height}`;
                         if (status.chain_mtp) {
-                            heightText += ` | MTP: ${formatUnixTs(status.chain_mtp)}`;
+                            // MTP is the median of the last 11 block timestamps, so it always
+                            // trails the tip's own timestamp — users compare it against the time
+                            // their wallet shows for the block and think one of them is wrong.
+                            // It is the value shown because it is what the network validates a
+                            // date-based nLockTime against.
+                            heightText += ` | ${t('mtp_label')}: ${formatUnixTs(status.chain_mtp)}`;
+                            height.title = t('mtp_tooltip');
                         }
                         if (status.chain_source === 'bitcoin_core') {
                             heightText += ' (Bitcoin Core)';

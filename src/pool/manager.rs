@@ -39,6 +39,13 @@ pub struct ScripthashNotification {
     pub scripthash: String,
 }
 
+/// A new chain tip, to be pushed to subscribed wallets as an Electrum header notification.
+#[derive(Clone, Debug)]
+pub struct ChainTipNotification {
+    pub height: u64,
+    pub hex: String,
+}
+
 pub struct PoolManager {
     db: Arc<Database>,
     rpc: Option<Arc<BitcoinRpc>>,
@@ -56,6 +63,9 @@ pub struct PoolManager {
     price_feed: PriceFeed,
     /// Broadcast channel for scripthash state changes (virtual mempool add/remove).
     scripthash_notifications: tokio::sync::broadcast::Sender<ScripthashNotification>,
+    /// Broadcast channel for chain tip advances, so wallet sessions can push
+    /// `blockchain.headers.subscribe` notifications as the Electrum protocol requires.
+    chain_tip_notifications: tokio::sync::broadcast::Sender<ChainTipNotification>,
     /// Broadcast channel for user-facing "your tx was redistributed" events. Drained by
     /// `run_notification_dispatcher`; a full or unsubscribed channel is silently ignored so
     /// notification delivery can never affect broadcasting.
@@ -81,6 +91,7 @@ impl PoolManager {
         config: Arc<Mutex<Config>>,
     ) -> Self {
         let (scripthash_notifications, _) = tokio::sync::broadcast::channel(256);
+        let (chain_tip_notifications, _) = tokio::sync::broadcast::channel(64);
         let (broadcast_notifications, _) = tokio::sync::broadcast::channel(256);
         Self {
             db,
@@ -94,6 +105,7 @@ impl PoolManager {
             health_refresh_in_flight: Arc::new(AtomicBool::new(false)),
             price_feed: PriceFeed::new(),
             scripthash_notifications,
+            chain_tip_notifications,
             broadcast_notifications,
             safe_mode: Arc::new(AtomicBool::new(false)),
             tampered_ids: Arc::new(Mutex::new(Vec::new())),
@@ -136,6 +148,11 @@ impl PoolManager {
         self.scripthash_notifications.subscribe()
     }
 
+    /// Subscribe to chain tip advances (for Electrum header push notifications).
+    pub fn subscribe_chain_tip(&self) -> tokio::sync::broadcast::Receiver<ChainTipNotification> {
+        self.chain_tip_notifications.subscribe()
+    }
+
     /// Subscribe to "a waiting tx was redistributed" events (notification dispatcher).
     pub fn subscribe_broadcast_notifications(
         &self,
@@ -147,8 +164,22 @@ impl PoolManager {
         if height == 0 || hex.is_empty() {
             return;
         }
-        if let Ok(mut cache) = self.cached_chain_tip.lock() {
-            *cache = Some((height, hex));
+        let changed = {
+            let Ok(mut cache) = self.cached_chain_tip.lock() else {
+                return;
+            };
+            // Only a genuinely new height is worth waking every wallet session for; the cache is
+            // rewritten on every poll with the same value most of the time. A reorg can lower the
+            // height, which is still a change wallets must see.
+            let changed = cache.as_ref().map(|(h, _)| *h) != Some(height);
+            *cache = Some((height, hex.clone()));
+            changed
+        };
+        if changed {
+            // Err just means no wallet is connected.
+            let _ = self
+                .chain_tip_notifications
+                .send(ChainTipNotification { height, hex });
         }
     }
 
@@ -795,6 +826,42 @@ impl PoolManager {
         Ok(results)
     }
 
+    /// Tell subscribed wallets that a transaction just confirmed, by nudging the scripthashes
+    /// it touches so they re-query.
+    ///
+    /// Nothing else does this. We relay no notifications from the indexer — the connection is
+    /// request/response only — so when a transaction is mined the wallet is never told, keeps
+    /// the last status it saw (unconfirmed) and only corrects itself on reconnect, which
+    /// re-queries everything. This closes that gap for transactions the pool broadcast.
+    ///
+    /// Runs once per transaction: on the next pass it is no longer in the `broadcast` list.
+    fn notify_tx_confirmed(&self, tx_id: &str, tx_hex: &str) {
+        // Outputs alone are free to derive; inputs need prev-tx lookups against the indexer.
+        // Both matter: a wallet may only recognise the spent side (a sweep with no change).
+        let indexer = self.get_indexer_url().unwrap_or_default();
+        let scripthashes = if indexer.is_empty() {
+            crate::pool::virtual_mempool::extract_output_scripthashes(tx_hex)
+        } else {
+            crate::pool::virtual_mempool::extract_affected_scripthashes(tx_hex, &indexer)
+        };
+
+        match scripthashes {
+            Ok(list) => {
+                for scripthash in list {
+                    // Err just means no wallet is connected.
+                    let _ = self
+                        .scripthash_notifications
+                        .send(ScripthashNotification { scripthash });
+                }
+            }
+            Err(e) => tracing::warn!(
+                "Could not derive scripthashes to announce confirmation of {}: {}",
+                tx_id,
+                e
+            ),
+        }
+    }
+
     pub fn check_confirmations(&self) -> Result<Vec<(String, bool, Option<u64>)>> {
         let network = {
             let config = self.config.lock().map_err(|e| anyhow::anyhow!("Config lock failed: {}", e))?;
@@ -814,6 +881,7 @@ impl PoolManager {
                                     // Transaction is in a block
                                     if let Ok(height) = rpc.get_block_count() {
                                         let _ = self.db.mark_confirmed(&tx.id, height);
+                                        self.notify_tx_confirmed(&tx.id, &tx.tx_hex);
                                         results.push((tx.id.clone(), true, Some(height)));
                                     } else {
                                         results.push((tx.id.clone(), true, None));
@@ -980,6 +1048,7 @@ impl PoolManager {
                 mempool_tx_count: None,
                 fee_rate_sat_vb: None,
                 congestion: None,
+                fee_estimate_reliable: false,
             };
         };
 
@@ -992,18 +1061,33 @@ impl PoolManager {
                     mempool_tx_count: None,
                     fee_rate_sat_vb: None,
                     congestion: None,
+                    fee_estimate_reliable: false,
                 };
             }
         };
 
-        let fee_rate = rpc.estimate_smart_fee(6).ok().flatten();
-        let congestion = fee_rate.map(|f| classify_mempool_congestion(f, &network).to_string());
+        // Two targets apart enough that a working estimator must price them differently.
+        let near = rpc.estimate_smart_fee(2).ok().flatten();
+        let far = rpc.estimate_smart_fee(144).ok().flatten();
+        let floor = rpc.get_mempool_floor().ok();
+        let estimate = resolve_fee_estimate(near, far, floor);
+
+        let congestion = estimate.map(|e| {
+            if e.reliable {
+                classify_mempool_congestion(e.sat_vb, &network).to_string()
+            } else {
+                // An unreliable figure must not drive a congestion verdict: we fell back to the
+                // floor precisely because there is no backlog to be congested by.
+                "low".to_string()
+            }
+        });
 
         MempoolStatus {
             available: true,
             mempool_tx_count: node.mempool_size,
-            fee_rate_sat_vb: fee_rate,
+            fee_rate_sat_vb: estimate.map(|e| e.sat_vb),
             congestion,
+            fee_estimate_reliable: estimate.map(|e| e.reliable).unwrap_or(false),
         }
     }
 
@@ -1514,6 +1598,72 @@ fn should_disarm(enabled: bool, armed_at_height: u64, real_height: u64) -> bool 
     enabled && real_height >= armed_at_height + 10
 }
 
+/// A mempool holding less than one block's worth of transactions has no backlog at all:
+/// whatever is in it goes into the next block, so nothing above the relay floor is required.
+const UNCONGESTED_VBYTES: u64 = 1_000_000;
+
+/// How far above the floor an estimate may sit before it stops being credible on an idle
+/// mempool. Generous: a real fee market can spike fast, and we only want to catch nonsense.
+const MAX_CREDIBLE_FLOOR_MULTIPLE: f64 = 20.0;
+
+/// What the fee estimator said, and whether we believe it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FeeEstimate {
+    pub sat_vb: f64,
+    /// False when the estimator's answer contradicts the observable mempool. The value is then
+    /// the floor, not the estimator's number.
+    pub reliable: bool,
+}
+
+/// Decide what fee rate to report.
+///
+/// Bitcoin Core's estimator learns from transactions it watched confirm. On a test network —
+/// erratic block production, occasional high-fee spam, long idle gaps — it produces values with
+/// no relation to what a transaction actually costs, and does NOT flag them via its `errors`
+/// field. Observed on testnet4: 361.7 sat/vB for every target while the mempool held 34 KB and
+/// the floor was 0.1 sat/vB.
+///
+/// Two independent checks, either of which discredits the estimate:
+/// - **A**: an idle mempool cannot justify a fee far above the relay floor.
+/// - **B**: a healthy estimator charges more for "next block" than for "within a day". An
+///   identical answer at both ends means it has no data to distinguish them.
+fn resolve_fee_estimate(
+    near_target: Option<f64>,
+    far_target: Option<f64>,
+    floor: Option<crate::rpc::client::MempoolFloor>,
+) -> Option<FeeEstimate> {
+    let floor_rate = floor.map(|f| f.min_fee_sat_vb.max(f.relay_floor_sat_vb));
+
+    let Some(estimate) = near_target else {
+        // No estimate at all: the floor is still a truthful answer, if we have it.
+        return floor_rate.map(|sat_vb| FeeEstimate { sat_vb, reliable: false });
+    };
+
+    // B — a flat curve across wildly different targets means the estimator is guessing.
+    let degenerate = match (near_target, far_target) {
+        (Some(n), Some(f)) => (n - f).abs() < f64::EPSILON,
+        _ => false,
+    };
+
+    // A — no backlog means no competition, so a large multiple of the floor is not credible.
+    let contradicted = match (floor, floor_rate) {
+        (Some(f), Some(rate)) if f.vbytes < UNCONGESTED_VBYTES && rate > 0.0 => {
+            estimate > rate * MAX_CREDIBLE_FLOOR_MULTIPLE
+        }
+        _ => false,
+    };
+
+    if degenerate || contradicted {
+        // Report the floor: on an idle mempool that is what a transaction actually needs.
+        return Some(FeeEstimate {
+            sat_vb: floor_rate.unwrap_or(estimate),
+            reliable: false,
+        });
+    }
+
+    Some(FeeEstimate { sat_vb: estimate, reliable: true })
+}
+
 fn classify_mempool_congestion(fee_sat_vb: f64, network: &str) -> &'static str {
     let (low_max, high_min) = match network {
         "mainnet" => (10.0, 50.0),
@@ -1568,6 +1718,175 @@ mod tests {
 
         let err = pm.run_scheduler_tick().expect_err("tick must refuse without a chain source");
         assert!(err.to_string().contains(NO_CHAIN_SOURCE));
+    }
+
+    // Wallets must be woken for a new block, but not for the poller rewriting the same tip
+    // every 30s — that would be a push storm for no information.
+    #[test]
+    fn chain_tip_notifies_only_on_a_real_change() {
+        let (pm, _dir) = test_manager();
+        let mut rx = pm.subscribe_chain_tip();
+
+        pm.cache_chain_tip(100, "aa".into());
+        let first = rx.try_recv().expect("first tip notified");
+        assert_eq!(first.height, 100);
+        assert_eq!(first.hex, "aa");
+
+        // Same height again: no notification.
+        pm.cache_chain_tip(100, "aa".into());
+        assert!(rx.try_recv().is_err());
+
+        pm.cache_chain_tip(101, "bb".into());
+        assert_eq!(rx.try_recv().expect("new tip notified").height, 101);
+    }
+
+    // A reorg lowers the tip. Wallets still need to know.
+    #[test]
+    fn a_lower_tip_after_a_reorg_still_notifies() {
+        let (pm, _dir) = test_manager();
+        pm.cache_chain_tip(100, "aa".into());
+        let mut rx = pm.subscribe_chain_tip();
+        pm.cache_chain_tip(99, "cc".into());
+        assert_eq!(rx.try_recv().expect("reorg notified").height, 99);
+    }
+
+    // Garbage must not reach wallets, and must not clobber a good cached tip.
+    #[test]
+    fn an_empty_or_zero_tip_is_ignored() {
+        let (pm, _dir) = test_manager();
+        pm.cache_chain_tip(100, "aa".into());
+        let mut rx = pm.subscribe_chain_tip();
+
+        pm.cache_chain_tip(0, "aa".into());
+        pm.cache_chain_tip(101, String::new());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(pm.get_cached_chain_tip(), Some((100, "aa".to_string())));
+    }
+
+    // No wallet connected must not be an error path.
+    #[test]
+    fn caching_a_tip_with_no_subscribers_is_fine() {
+        let (pm, _dir) = test_manager();
+        pm.cache_chain_tip(100, "aa".into());
+        assert_eq!(pm.get_cached_chain_tip(), Some((100, "aa".to_string())));
+    }
+
+    fn floor(vbytes: u64, min: f64) -> crate::rpc::client::MempoolFloor {
+        crate::rpc::client::MempoolFloor {
+            vbytes,
+            min_fee_sat_vb: min,
+            relay_floor_sat_vb: min,
+        }
+    }
+
+    // The exact numbers observed on the testnet4 node: the estimator insisted on 361.7 sat/vB
+    // for every target while the mempool held 34 KB at a 0.1 sat/vB floor.
+    #[test]
+    fn the_observed_testnet4_nonsense_is_rejected() {
+        let est = resolve_fee_estimate(Some(361.659), Some(361.659), Some(floor(34_535, 0.1)))
+            .expect("an answer");
+        assert!(!est.reliable);
+        assert_eq!(est.sat_vb, 0.1, "should fall back to the floor, not the fantasy");
+    }
+
+    // B alone: a flat curve is not credible even if the mempool is busy.
+    #[test]
+    fn an_identical_estimate_at_both_targets_is_not_credible() {
+        let est = resolve_fee_estimate(Some(50.0), Some(50.0), Some(floor(5_000_000, 2.0)))
+            .expect("an answer");
+        assert!(!est.reliable);
+    }
+
+    // A alone: a plausible curve, but an idle mempool cannot cost 200x the floor.
+    #[test]
+    fn an_idle_mempool_cannot_justify_a_huge_fee() {
+        let est = resolve_fee_estimate(Some(200.0), Some(80.0), Some(floor(10_000, 1.0)))
+            .expect("an answer");
+        assert!(!est.reliable);
+        assert_eq!(est.sat_vb, 1.0);
+    }
+
+    // A real fee market must still be reported as-is: a descending curve on a full mempool.
+    #[test]
+    fn a_genuine_fee_market_is_trusted() {
+        let est = resolve_fee_estimate(Some(45.0), Some(12.0), Some(floor(80_000_000, 3.0)))
+            .expect("an answer");
+        assert!(est.reliable);
+        assert_eq!(est.sat_vb, 45.0);
+    }
+
+    // A modest fee on an idle mempool is normal and must not be flagged.
+    #[test]
+    fn a_small_fee_on_an_idle_mempool_is_trusted() {
+        let est = resolve_fee_estimate(Some(3.0), Some(1.5), Some(floor(20_000, 1.0)))
+            .expect("an answer");
+        assert!(est.reliable);
+        assert_eq!(est.sat_vb, 3.0);
+    }
+
+    // No estimate: the floor is still the truth, but we do not dress it up as an estimate.
+    #[test]
+    fn without_an_estimate_the_floor_is_reported_as_unreliable() {
+        let est = resolve_fee_estimate(None, None, Some(floor(20_000, 0.1))).expect("an answer");
+        assert!(!est.reliable);
+        assert_eq!(est.sat_vb, 0.1);
+    }
+
+    #[test]
+    fn without_an_estimate_or_a_floor_there_is_no_answer() {
+        assert_eq!(resolve_fee_estimate(None, None, None), None);
+    }
+
+    // Without mempool data we cannot apply either check, so the estimate stands.
+    #[test]
+    fn an_estimate_with_no_mempool_data_is_taken_at_face_value() {
+        let est = resolve_fee_estimate(Some(25.0), Some(9.0), None).expect("an answer");
+        assert!(est.reliable);
+        assert_eq!(est.sat_vb, 25.0);
+    }
+
+    /// A minimal one-output transaction, hex-encoded, plus the scripthash of that output.
+    fn tx_with_one_output() -> (String, String) {
+        use bitcoin::consensus::Encodable;
+        use bitcoin::{absolute::LockTime, transaction::Version, Amount, ScriptBuf, Transaction, TxOut};
+
+        let script = ScriptBuf::from_hex("0014d952c2c0d09d4ef2e1e3f0a1e3e5c8f2d4b6a7c8").unwrap();
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut { value: Amount::from_sat(1000), script_pubkey: script.clone() }],
+        };
+        let mut raw = Vec::new();
+        tx.consensus_encode(&mut raw).unwrap();
+        (
+            hex::encode(raw),
+            crate::pool::virtual_mempool::compute_scripthash(&script),
+        )
+    }
+
+    // Nothing relays the indexer's notifications, so a mined transaction never reached the
+    // wallet: it kept showing unconfirmed until a reconnect re-queried everything. Confirming
+    // must nudge the scripthashes the tx touches so the wallet asks again.
+    #[test]
+    fn confirming_a_tx_nudges_its_scripthashes() {
+        let (pm, _dir) = test_manager();
+        let (tx_hex, expected_sh) = tx_with_one_output();
+        let mut rx = pm.subscribe_scripthash_changes();
+
+        pm.notify_tx_confirmed("some-id", &tx_hex);
+
+        let got = rx.try_recv().expect("a scripthash was announced");
+        assert_eq!(got.scripthash, expected_sh);
+    }
+
+    // Undecodable hex must be logged, not panic the confirmation loop.
+    #[test]
+    fn confirming_an_undecodable_tx_is_survivable() {
+        let (pm, _dir) = test_manager();
+        let mut rx = pm.subscribe_scripthash_changes();
+        pm.notify_tx_confirmed("some-id", "not-hex");
+        assert!(rx.try_recv().is_err());
     }
 
     // A data path that sees the indexer fail must demote it immediately, or every later call keeps
