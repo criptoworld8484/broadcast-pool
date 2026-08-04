@@ -931,6 +931,136 @@ fn fetch_scripthash_history(indexer_url: &str, scripthash: &str) -> Vec<serde_js
         .unwrap_or_default()
 }
 
+/// Keeps ONE persistent subscription to the indexer for every scripthash a connected wallet
+/// cares about, and relays what arrives into the notification channel wallet sessions listen on.
+///
+/// Every other call to the indexer opens a fresh connection, sends one line and closes it
+/// (`forward_to_indexer_sync`). That works for request/response but means we hold no
+/// subscription, so the indexer has no way to tell us anything: a payment arriving, a
+/// transaction confirming, a reorg. Wallets only ever saw what they thought to ask for, and a
+/// reconnect was the one reliable way to resync.
+///
+/// Deliberately additive: the request path is untouched. This only adds a source of
+/// notifications, delivered through the channel that already carries them.
+pub async fn run_indexer_subscription_relay(
+    pool_manager: Arc<PoolManager>,
+    config: Arc<Mutex<Config>>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+    let mut backoff = std::time::Duration::from_secs(2);
+    let max_backoff = std::time::Duration::from_secs(60);
+
+    loop {
+        let indexer_url = resolve_live_indexer_url(&pool_manager, &config);
+        if indexer_url.is_empty() {
+            tokio::time::sleep(IDLE_TICK).await;
+            continue;
+        }
+
+        let stream = match connect_indexer(&indexer_url).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("Subscription relay: connect failed ({}), retrying", e);
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(max_backoff);
+                continue;
+            }
+        };
+        tracing::info!("Subscription relay connected to {}", indexer_url);
+        backoff = std::time::Duration::from_secs(2);
+
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read_half).lines();
+        // Subscriptions live with the connection: on reconnect everything must be re-sent.
+        let mut subscribed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut next_id: u64 = 1_000_000;
+        let mut tick = tokio::time::interval(IDLE_TICK);
+
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let wanted = pool_manager.watched_scripthashes();
+                    let mut failed = false;
+                    let mut added = 0usize;
+                    for sh in wanted {
+                        if subscribed.contains(&sh) {
+                            continue;
+                        }
+                        let req = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "blockchain.scripthash.subscribe",
+                            "params": [sh],
+                            "id": next_id
+                        });
+                        next_id += 1;
+                        let mut line = req.to_string().into_bytes();
+                        line.push(b'\n');
+                        if write_half.write_all(&line).await.is_err() {
+                            failed = true;
+                            break;
+                        }
+                        subscribed.insert(sh);
+                        added += 1;
+                    }
+                    if failed || write_half.flush().await.is_err() {
+                        tracing::warn!("Subscription relay: write failed, reconnecting");
+                        break;
+                    }
+                    if added > 0 {
+                        // Without this there is no way to tell "subscribed and quiet" from
+                        // "never subscribed", which are indistinguishable from the outside.
+                        tracing::info!(
+                            "Subscription relay: watching {} more scripthash(es) upstream ({} total)",
+                            added,
+                            subscribed.len()
+                        );
+                    }
+                }
+                line = reader.next_line() => {
+                    match line {
+                        Ok(Some(text)) => {
+                            if let Some(sh) = scripthash_from_notification(&text) {
+                                tracing::info!(
+                                    "Indexer announced a change for scripthash {}",
+                                    &sh[..sh.len().min(16)]
+                                );
+                                pool_manager.announce_scripthash_change(sh);
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::info!("Subscription relay: indexer closed the connection");
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Subscription relay read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+/// The scripthash from an unsolicited `blockchain.scripthash.subscribe` notification.
+///
+/// Responses to our own subscribe calls carry `result` and an `id`; notifications carry
+/// `method` and `params`. Only the latter mean "something changed".
+fn scripthash_from_notification(line: &str) -> Option<String> {
+    let msg: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if msg.get("method")?.as_str()? != "blockchain.scripthash.subscribe" {
+        return None;
+    }
+    let sh = msg.get("params")?.as_array()?.first()?.as_str()?;
+    if sh.is_empty() {
+        return None;
+    }
+    Some(sh.to_string())
+}
+
 pub fn refresh_chain_tip_cache(indexer_url: &str, pool_manager: &PoolManager) {
     if indexer_url.is_empty() {
         return;
@@ -1181,9 +1311,17 @@ fn build_scripthash_mempool_result(
 }
 
 /// Track wallet scripthashes Sparrow cares about (subscribe + post-broadcast poll).
-fn track_scripthash_interest(session: &mut SessionState, scripthash: &str) {
+fn track_scripthash_interest(
+    session: &mut SessionState,
+    pool_manager: &PoolManager,
+    scripthash: &str,
+) {
     if !scripthash.is_empty() {
         session.subscribed_scripthashes.insert(scripthash.to_string());
+        // Watch it upstream too. Without this the indexer has no way to tell us anything about
+        // this scripthash — no incoming payment, no confirmation — because we hold no
+        // subscription of our own.
+        pool_manager.watch_scripthash(scripthash);
     }
 }
 
@@ -1223,7 +1361,7 @@ async fn handle_one_subrequest(
         || request.method == "blockchain.scripthash.get_mempool"
     {
         if let Some(sh) = scripthash_from_params(&request.params) {
-            track_scripthash_interest(session, &sh);
+            track_scripthash_interest(session, pool_manager, &sh);
             let pending = pending_txids_for_scripthash_with_session(
                 pool_manager,
                 &sh,
@@ -1249,7 +1387,7 @@ async fn handle_one_subrequest(
 
     if request.method == "blockchain.scripthash.subscribe" {
         if let Some(sh) = scripthash_from_params(&request.params) {
-            track_scripthash_interest(session, &sh);
+            track_scripthash_interest(session, pool_manager, &sh);
             let pending = pending_txids_for_scripthash_with_session(
                 pool_manager,
                 &sh,
@@ -2867,6 +3005,41 @@ mod tests {
     }
 
     #[test]
+    // Only unsolicited notifications mean "something changed". A response to our own subscribe
+    // carries the current status under `result` and must not be mistaken for one, or every
+    // subscription would announce a change that never happened.
+    #[test]
+    fn a_subscribe_response_is_not_a_notification() {
+        let response = r#"{"jsonrpc":"2.0","result":"abc123","id":1000001}"#;
+        assert_eq!(scripthash_from_notification(response), None);
+    }
+
+    #[test]
+    fn an_upstream_notification_yields_its_scripthash() {
+        let note = r#"{"jsonrpc":"2.0","method":"blockchain.scripthash.subscribe","params":["aa11bb22","ff00"]}"#;
+        assert_eq!(scripthash_from_notification(note), Some("aa11bb22".to_string()));
+    }
+
+    // A null status means "no history now" — still a change the wallet must see.
+    #[test]
+    fn a_notification_with_a_null_status_still_counts() {
+        let note = r#"{"jsonrpc":"2.0","method":"blockchain.scripthash.subscribe","params":["aa11bb22",null]}"#;
+        assert_eq!(scripthash_from_notification(note), Some("aa11bb22".to_string()));
+    }
+
+    #[test]
+    fn other_traffic_is_ignored() {
+        for line in [
+            r#"{"jsonrpc":"2.0","method":"blockchain.headers.subscribe","params":[{"height":1}]}"#,
+            r#"{"jsonrpc":"2.0","method":"blockchain.scripthash.subscribe","params":[]}"#,
+            r#"{"jsonrpc":"2.0","method":"blockchain.scripthash.subscribe","params":["",""]}"#,
+            "not json",
+            "",
+        ] {
+            assert_eq!(scripthash_from_notification(line), None, "linea: {line}");
+        }
+    }
+
     fn parse_headers_subscribe_rejects_height_zero() {
         let zero = serde_json::json!({"result":{"height":0,"hex":"abc"}});
         assert!(parse_headers_subscribe_result(&zero).is_none());

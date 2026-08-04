@@ -482,6 +482,12 @@ impl Scheduler {
             }
         });
 
+        let pool_manager = self.pool_manager.clone();
+        let config = self.config.clone();
+        tokio::spawn(async move {
+            crate::electrum_server::run_indexer_subscription_relay(pool_manager, config).await;
+        });
+
         tracing::info!("All scheduler loops started");
         Ok(())
     }

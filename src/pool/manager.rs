@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -75,6 +75,10 @@ pub struct PoolManager {
     safe_mode: Arc<AtomicBool>,
     /// Ids of tampered rows detected while safe mode is active, for the dashboard banner.
     tampered_ids: Arc<Mutex<Vec<String>>>,
+    /// Scripthashes any connected wallet has subscribed to. The upstream relay keeps a single
+    /// persistent subscription to their union, so the indexer can tell us about coins arriving
+    /// or confirming without a wallet having to ask.
+    watched_scripthashes: Arc<Mutex<HashSet<String>>>,
 }
 
 /// A tx the user schedules by hand from the dashboard: retained wallet txs under manual mode and
@@ -109,6 +113,7 @@ impl PoolManager {
             broadcast_notifications,
             safe_mode: Arc::new(AtomicBool::new(false)),
             tampered_ids: Arc::new(Mutex::new(Vec::new())),
+            watched_scripthashes: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -146,6 +151,32 @@ impl PoolManager {
     /// Subscribe to scripthash state change notifications.
     pub fn subscribe_scripthash_changes(&self) -> tokio::sync::broadcast::Receiver<ScripthashNotification> {
         self.scripthash_notifications.subscribe()
+    }
+
+    /// Register a scripthash a wallet just subscribed to, so the upstream relay watches it too.
+    pub fn watch_scripthash(&self, scripthash: &str) {
+        if scripthash.is_empty() {
+            return;
+        }
+        if let Ok(mut set) = self.watched_scripthashes.lock() {
+            set.insert(scripthash.to_string());
+        }
+    }
+
+    /// Every scripthash currently worth watching upstream.
+    pub fn watched_scripthashes(&self) -> Vec<String> {
+        self.watched_scripthashes
+            .lock()
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Announce a scripthash change seen upstream. Same channel wallet sessions already listen
+    /// on, so the delivery path is the one we already fixed to send a real status.
+    pub fn announce_scripthash_change(&self, scripthash: String) {
+        let _ = self
+            .scripthash_notifications
+            .send(ScripthashNotification { scripthash });
     }
 
     /// Subscribe to chain tip advances (for Electrum header push notifications).
